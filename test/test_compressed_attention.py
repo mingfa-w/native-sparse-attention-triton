@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific
 import torch
+import torch_npu
 import triton
 import math
 from native_sparse_attention.ops.torch.compressed_attention import (
@@ -25,8 +26,6 @@ from native_sparse_attention.ops.triton.flash_attention import (
     flash_attention_varlen,
     _flash_attention_bwd,
 )
-from flash_attn import flash_attn_varlen_func
-from flash_attn.flash_attn_interface import _flash_attn_varlen_backward
 
 
 if __name__ == "__main__":
@@ -37,27 +36,27 @@ if __name__ == "__main__":
     kernel_stride = 16
     block_size = 64
     topk = 16
-    seqlens = torch.LongTensor([1000, 4000, 8192]).int().cuda()
+    seqlens = torch.LongTensor([1000, 4000, 8192]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
     ).to(torch.int32)
     max_seqlen = seqlens.max().item()
     q = (
-        torch.empty(cu_seqlens[-1], num_heads, head_dim, device="cuda")
+        torch.empty(cu_seqlens[-1], num_heads, head_dim, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     k = (
-        torch.empty(cu_seqlens[-1], num_heads // 4, head_dim, device="cuda")
+        torch.empty(cu_seqlens[-1], num_heads // 4, head_dim, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     v = (
-        torch.empty(cu_seqlens[-1], num_heads // 4, head_dim, device="cuda")
+        torch.empty(cu_seqlens[-1], num_heads // 4, head_dim, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
@@ -169,10 +168,10 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, H, D, provider):
-        q = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        k = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        v = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        q = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        k = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        v = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         sm_scale = 1 / math.sqrt(D)
         com_k, com_cu_seqlens = avgpool_compress(k, None, cu_seqlens, 32, 16, None)
         com_v, com_cu_seqlens = avgpool_compress(v, None, cu_seqlens, 32, 16, None)
@@ -180,21 +179,23 @@ if __name__ == "__main__":
 
         quantiles = [0.5, 0.2, 0.8]
         if provider == "flash":
+            head_num = q.shape[1]
+            atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: flash_attn_varlen_func(
-                    q,
-                    k,
-                    v,
-                    cu_seqlens,
-                    cu_seqlens,
-                    N,
-                    N,
-                    dropout_p=0.0,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                ),
+                lambda: torch_npu.npu_fusion_attention(
+                q, k, v, head_num,
+                pse=None,
+                padding_mask=None,
+                atten_mask=atten_mask_npu,
+                scale=1.0 / math.sqrt(q.shape[-1]),
+                keep_prob=1,
+                input_layout="TND",
+                actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                sparse_mode=3)[0],
                 quantiles=quantiles,
-            )
+            ),
+             
         if provider == "triton-flash":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: flash_attention_varlen(
@@ -230,102 +231,6 @@ if __name__ == "__main__":
                     16,
                     64,
                     -1,
-                    cu_seqlens,
-                    com_cu_seqlens,
-                    N,
-                    M,
-                    sm_scale,
-                ),
-                quantiles=quantiles,
-            )
-        return ms, min_ms, max_ms
-
-    benchmark.run(show_plots=True, print_data=True)
-
-    # benchmark
-    @triton.testing.perf_report(
-        triton.testing.Benchmark(
-            x_names=["N"],
-            x_vals=[1024 * 2**i for i in range(1, 8)],
-            line_arg="provider",
-            line_vals=[
-                "flash",
-                "triton-flash",
-                "triton-compressed",
-            ],
-            line_names=[
-                "Flash",
-                "Triton-Flash",
-                "Compressed",
-            ],
-            styles=[("green", "-"), ("green", "--"), ("blue", "-"), ("blue", "--")],
-            ylabel="ms",
-            plot_name="** backward speed for compressed attention (kernel 32 stride 16) **",
-            args={"H": 64, "D": 128},
-        )
-    )
-    def benchmark(N, H, D, provider):
-        q = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        k = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        v = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        o = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        do = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        lse = torch.randn((H, N), device="cuda", dtype=torch.float32)
-        sm_scale = 1 / math.sqrt(D)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
-        dq = torch.zeros_like(q)
-        dk = torch.zeros_like(k)
-        dv = torch.zeros_like(v)
-
-        com_k, com_cu_seqlens = avgpool_compress(k, None, cu_seqlens, 32, 16, None)
-        com_v, com_cu_seqlens = avgpool_compress(v, None, cu_seqlens, 32, 16, None)
-        M = (com_cu_seqlens[1:] - com_cu_seqlens[:-1]).max().item()
-
-        quantiles = [0.5, 0.2, 0.8]
-        if provider == "flash":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_varlen_backward(
-                    do,
-                    q,
-                    k,
-                    v,
-                    o,
-                    lse.transpose(0, 1),
-                    dq,
-                    dk,
-                    dv,
-                    cu_seqlens,
-                    cu_seqlens,
-                    N,
-                    N,
-                    dropout_p=0.0,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                    window_size=(-1, -1),
-                    softcap=0.0,
-                    alibi_slopes=None,
-                    deterministic=False,
-                ),
-                quantiles=quantiles,
-            )
-        if provider == "triton-flash":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attention_bwd(
-                    o, do, lse, q, k, v, cu_seqlens, cu_seqlens, N, N, True, sm_scale
-                ),
-                quantiles=quantiles,
-            )
-        if provider == "triton-compressed":
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _compressed_attention_bwd(
-                    o,
-                    do,
-                    lse,
-                    q,
-                    com_k,
-                    com_v,
-                    32,
-                    16,
                     cu_seqlens,
                     com_cu_seqlens,
                     N,

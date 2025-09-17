@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
+import torch_npu
+import math
 from typing import Tuple, Callable, Optional
-from flash_attn import flash_attn_varlen_func
+##from flash_attn import flash_attn_varlen_func
 from native_sparse_attention.ops import (
     flash_attention_decode,
     compressed_attention,
@@ -177,17 +179,20 @@ def sliding_window_attention_infer(
 ):
     if step == 0:
         seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        attn_output = flash_attn_varlen_func(
-            query,
-            key,
-            value,
-            cu_seqlens,
-            cu_seqlens,
-            seqlens.max().item(),
-            seqlens.max().item(),
-            causal=True,
-            window_size=(window_size, -1),
-        )
+        atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
+        head_num = query.shape[1]
+        attn_output = torch_npu.npu_fusion_attention(
+                query, key, value, head_num,
+                pse=None,
+                padding_mask=None,
+                atten_mask=atten_mask_npu,
+                scale=1.0 / math.sqrt(query.shape[-1]),
+                keep_prob=1,
+                input_layout="TND",
+                actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                sparse_mode=3)[0]
+  
     else:
         batch_size = cu_seqlens.shape[0] - 1
         attn_output = flash_attention_decode(

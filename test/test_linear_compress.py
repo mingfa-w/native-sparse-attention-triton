@@ -27,7 +27,7 @@ def test_linear_compress(
     kernel_strides: list = [8, 16],
     use_pe: bool = True,
     dtype: torch.dtype = torch.float32,
-    device: str = "cuda",
+    device: str = "npu",
 ):
     """
     Test both PyTorch and Triton implementations of linear_compress for equivalence,
@@ -200,7 +200,7 @@ if __name__ == "__main__":
         kernel_strides=[16],
         use_pe=False,
         dtype=torch.float16,
-        device="cuda",
+        device="npu",
     )
 
     # benchmark
@@ -220,19 +220,19 @@ if __name__ == "__main__":
     def benchmark_fwdbwd(N, H, D, provider):
         K, S = 32, 16
         # Input tensors
-        x = torch.zeros(N, H, D, device="cuda", dtype=torch.bfloat16).uniform_(-1, 1)
+        x = torch.zeros(N, H, D, device="npu", dtype=torch.bfloat16).uniform_(-1, 1)
         x.requires_grad = True
-        w = torch.zeros(H, K * D, D, device="cuda", dtype=torch.bfloat16).uniform_(
+        w = torch.zeros(H, K * D, D, device="npu", dtype=torch.bfloat16).uniform_(
             -1, 1
         )
         w.requires_grad = True
-        pe = torch.zeros(H, K, D, device="cuda", dtype=torch.bfloat16).uniform_(-1, 1)
+        pe = torch.zeros(H, K, D, device="npu", dtype=torch.bfloat16).uniform_(-1, 1)
         cu_seqlens_b32 = (
             torch.LongTensor(
                 [0 if i == 0 else 32 if i > 1 else N - 32 * 31 for i in range(33)]
             )
             .int()
-            .cuda()
+            .npu()
         )
         cu_seqlens_b32 = cu_seqlens_b32.cumsum(0).to(torch.int32)
 

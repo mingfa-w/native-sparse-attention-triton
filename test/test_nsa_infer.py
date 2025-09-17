@@ -31,18 +31,18 @@ if __name__ == "__main__":
     local_blocks = 2
 
     # init seqlens
-    seqlens = torch.tensor([12, 576, 12000]).to(torch.int32).cuda()
+    seqlens = torch.tensor([12, 576, 12000]).to(torch.int32).npu()
     batch_size = seqlens.shape[0]
-    cu_seqlens = torch.zeros(seqlens.shape[0] + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.zeros(seqlens.shape[0] + 1, dtype=torch.int32, device="npu")
     cu_seqlens[1:] = seqlens.cumsum(0)
     step = 0
 
     # init cache and weight and rope
-    cache = NSACache(4, 16384, num_heads, head_dim, 32, 16, 512, torch.bfloat16, "cuda")
+    cache = NSACache(4, 16384, num_heads, head_dim, 32, 16, 512, torch.bfloat16, "npu")
     compress_weight = [
-        torch.ones(num_heads, kernel_size * head_dim, head_dim).cuda().bfloat16()
+        torch.ones(num_heads, kernel_size * head_dim, head_dim).npu().bfloat16()
         / (kernel_size * head_dim),
-        torch.ones(num_heads, kernel_size).cuda().bfloat16() / kernel_size,
+        torch.ones(num_heads, kernel_size).npu().bfloat16() / kernel_size,
     ]
     compress_func = [linear_compress, weightedpool_compress]
     rope = RotaryEmbedding(
@@ -61,10 +61,10 @@ if __name__ == "__main__":
     )
 
     # test prefill
-    q = torch.randn(cu_seqlens[-1], num_heads * 16, head_dim).cuda().bfloat16()
-    k = torch.randn(cu_seqlens[-1], num_heads, head_dim).cuda().bfloat16()
+    q = torch.randn(cu_seqlens[-1], num_heads * 16, head_dim).npu().bfloat16()
+    k = torch.randn(cu_seqlens[-1], num_heads, head_dim).npu().bfloat16()
     v = torch.randn_like(k)
-    g = torch.rand(cu_seqlens[-1], num_heads * 16, 3).cuda().bfloat16()
+    g = torch.rand(cu_seqlens[-1], num_heads * 16, 3).npu().bfloat16()
     o = nsa_infer(
         cu_seqlens,
         step,
@@ -88,10 +88,10 @@ if __name__ == "__main__":
     print(o.shape, o.norm())
 
     # test decode
-    q = torch.randn(cu_seqlens.shape[0] - 1, num_heads * 16, head_dim).cuda().bfloat16()
-    k = torch.randn(cu_seqlens.shape[0] - 1, num_heads, head_dim).cuda().bfloat16()
+    q = torch.randn(cu_seqlens.shape[0] - 1, num_heads * 16, head_dim).npu().bfloat16()
+    k = torch.randn(cu_seqlens.shape[0] - 1, num_heads, head_dim).npu().bfloat16()
     v = torch.randn_like(k)
-    g = torch.rand(cu_seqlens.shape[0] - 1, num_heads * 16, 3).cuda().bfloat16()
+    g = torch.rand(cu_seqlens.shape[0] - 1, num_heads * 16, 3).npu().bfloat16()
     step = 1
     o = nsa_infer(
         cu_seqlens,

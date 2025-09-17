@@ -280,7 +280,7 @@ def torch_topk_sparse_attention_decode(
                         * block_size,
                     ] = True
     mask = mask & (
-        (seqlens - 1)[:, None, None] >= torch.arange(k_len).cuda()[None, None, :]
+        (seqlens - 1)[:, None, None] >= torch.arange(k_len).npu()[None, None, :]
     )
     mask = mask.repeat_interleave(num_share_q_heads, 1)
     # attention
@@ -306,7 +306,7 @@ def generate_topk_idx_example(
     topk_idx_all_heads = []
     for _ in range(num_heads):
         topk_idx = [
-            torch.randn(1, num_blocks[i], device="cuda")
+            torch.randn(1, num_blocks[i], device="npu")
             .topk(min(topk, num_blocks[i]), dim=-1)
             .indices.to(torch.int32)
             for i in range(batch_size)
@@ -333,21 +333,21 @@ if __name__ == "__main__":
     block_size = 64
     batch_size = 76
     max_length = 8192
-    seqlens = torch.arange(batch_size, dtype=torch.int32).cuda() * 128 + 1
+    seqlens = torch.arange(batch_size, dtype=torch.int32).npu() * 128 + 1
     seqlens[seqlens > max_length] = max_length
     seqlens = seqlens[torch.randn_like(seqlens, dtype=torch.float32).argsort(-1)]
     q = (
-        torch.empty(batch_size, 32, 128, device="cuda")
+        torch.empty(batch_size, 32, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     k = (
-        torch.empty(batch_size, max_length, 4, 128, device="cuda")
+        torch.empty(batch_size, max_length, 4, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     v = (
-        torch.empty(batch_size, max_length, 4, 128, device="cuda")
+        torch.empty(batch_size, max_length, 4, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )

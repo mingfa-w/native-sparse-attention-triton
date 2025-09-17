@@ -262,21 +262,21 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     batch_size = 76
     max_length = 8192
-    seqlens = torch.arange(batch_size, dtype=torch.int32).cuda() * 128 + 1
+    seqlens = torch.arange(batch_size, dtype=torch.int32).npu() * 128 + 1
     seqlens[seqlens > max_length] = max_length
     seqlens = seqlens[torch.randn_like(seqlens, dtype=torch.float32).argsort(-1)]
     q = (
-        torch.empty(batch_size, 32, 128, device="cuda")
+        torch.empty(batch_size, 32, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.bfloat16)
     )
     k = (
-        torch.empty(batch_size, max_length, 4, 128, device="cuda")
+        torch.empty(batch_size, max_length, 4, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.bfloat16)
     )
     v = (
-        torch.empty(batch_size, max_length, 4, 128, device="cuda")
+        torch.empty(batch_size, max_length, 4, 128, device="npu")
         .uniform_(-1, 1)
         .to(torch.bfloat16)
     )

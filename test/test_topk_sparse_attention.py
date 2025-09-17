@@ -25,10 +25,10 @@ from native_sparse_attention.ops.triton.flash_attention import (
     _flash_attention_fwd,
     _flash_attention_bwd,
 )
-from flash_attn.flash_attn_interface import (
+""" from flash_attn.flash_attn_interface import (
     _flash_attn_varlen_forward,
     _flash_attn_varlen_backward,
-)
+) """
 
 
 def generate_topk_idx_example(
@@ -56,7 +56,7 @@ def generate_topk_idx_example(
     cu_seqlens = torch.nn.functional.pad(seqlens.cumsum(0), pad=(1, 0), value=0)
     for _ in range(num_heads):
         topk_idx = [
-            torch.randn(seqlens[i], num_blocks[i], device="cuda")
+            torch.randn(seqlens[i], num_blocks[i], device="npu")
             .topk(min(topk, num_blocks[i]), dim=-1)
             .indices.to(torch.int32)
             for i in range(batch_size)
@@ -71,7 +71,7 @@ def generate_topk_idx_example(
         topk_idx = torch.sort(topk_idx, dim=1).values
         topk_idx[:, 0] = 0
         q_idx = torch.cat(
-            [torch.arange(seqlens[i], device="cuda") for i in range(batch_size)], dim=0
+            [torch.arange(seqlens[i], device="npu") for i in range(batch_size)], dim=0
         )
         topk_idx[topk_idx > (q_idx // block_size_k)[:, None]] = -1  # -1 means padding
         topk_idx = torch.cat(
@@ -89,27 +89,27 @@ def generate_topk_idx_example(
 if __name__ == "__main__":
     torch.manual_seed(42)
     batch_size = 3
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().cuda()
+    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
     ).to(torch.int32)
     max_seqlen = seqlens.max().item()
     q = (
-        torch.empty(cu_seqlens[-1], 64, 96, device="cuda")
+        torch.empty(cu_seqlens[-1], 64, 96, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     k = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="cuda")
+        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     v = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="cuda")
+        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
@@ -172,17 +172,18 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, H, D, K, provider):
-        q = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        k = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        v = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        q = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        k = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        v = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         sm_scale = 1 / math.sqrt(D)
 
         top8_idx = generate_topk_idx_example(cu_seqlens[1:], K, 8, H // 16)
         top16_idx = generate_topk_idx_example(cu_seqlens[1:], K, 16, H // 16)
 
         quantiles = [0.5, 0.2, 0.8]
-        if provider == "flash":
+        """  
+       if provider == "flash":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: _flash_attn_varlen_forward(
                     q,
@@ -197,7 +198,8 @@ if __name__ == "__main__":
                     softmax_scale=sm_scale,
                 ),
                 quantiles=quantiles,
-            )
+            ) 
+        """
         if provider == "triton-flash":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: _flash_attention_fwd(
@@ -207,7 +209,8 @@ if __name__ == "__main__":
             )
         if provider == "triton-top8":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _topk_sparse_attention_fwd(
+                lambda: 
+                _topk_sparse_attention_fwd(
                     q, k, v, top8_idx, K, cu_seqlens, cu_seqlens, N, N, sm_scale
                 ),
                 quantiles=quantiles,
@@ -223,6 +226,7 @@ if __name__ == "__main__":
 
     benchmark.run(show_plots=True, print_data=True)
 
+    """    
     # benchmark
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -243,14 +247,14 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, H, D, K, provider):
-        q = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        k = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        v = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        o = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        do = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        lse = torch.randn((H, N), device="cuda", dtype=torch.float32)
+        q = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        k = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        v = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        o = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        do = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        lse = torch.randn((H, N), device="npu", dtype=torch.float32)
         sm_scale = 1 / math.sqrt(D)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         top8_idx = generate_topk_idx_example(cu_seqlens[1:], K, 8, H // 16)
         top16_idx = generate_topk_idx_example(cu_seqlens[1:], K, 16, H // 16)
         dq = torch.zeros_like(q)
@@ -331,4 +335,5 @@ if __name__ == "__main__":
             )
         return ms, min_ms, max_ms
 
-    benchmark.run(show_plots=True, print_data=True)
+    benchmark.run(show_plots=True, print_data=True) 
+    """

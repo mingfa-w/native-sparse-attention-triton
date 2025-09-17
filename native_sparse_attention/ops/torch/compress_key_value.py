@@ -194,7 +194,7 @@ def linear_compress_torch(
     y_seqlens[seqlens < kernel_size] = 0
     y_cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(y_seqlens, dim=0),
         ],
         dim=0,

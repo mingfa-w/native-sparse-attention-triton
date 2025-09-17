@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
-from flash_attn import flash_attn_varlen_func
+import torch_npu
+import math
 from native_sparse_attention.ops import (
     compressed_attention,
     topk_sparse_attention,
@@ -208,7 +209,21 @@ class NativeSparseAttention(torch.nn.Module):
         sparse_attn_output = topk_sparse_attention(
             q, k, v, topk_idx, self.block_size, cu_seqlens, None
         )
+        head_num = q.shape[1]
+        atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
+        sliding_attn_output = torch_npu.npu_fusion_attention(
+            q, k, v, head_num,
+            pse=None,
+            padding_mask=None,
+            atten_mask=atten_mask_npu,
+            scale=1.0 / math.sqrt(q.shape[-1]),
+            keep_prob=1,
+            input_layout="TND",
+            actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+            actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+            sparse_mode=3)[0]
 
+        """    
         # sliding window attention
         sliding_attn_output = flash_attn_varlen_func(
             q,
@@ -220,7 +235,8 @@ class NativeSparseAttention(torch.nn.Module):
             seqlens.max().item(),
             causal=True,
             window_size=(self.window_size, -1),
-        )
+        ) 
+        """
 
         # gate average
         gate = self.gate(x)

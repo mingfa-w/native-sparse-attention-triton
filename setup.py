@@ -31,7 +31,6 @@ setup(
     packages=find_packages(),
     install_requires=[
         "torch>=2.1.0",
-        "triton>=3.0.0",
         "einops>=0.7.0",
         "flash-attn>=2.6.3",
         "transformers>=4.44.0",

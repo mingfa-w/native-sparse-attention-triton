@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import torch
-from flash_attn import flash_attn_varlen_func
+import torch_npu
+#from flash_attn import flash_attn_varlen_func
 from einops import rearrange
 from native_sparse_attention.module.rope import RopeConfig, RotaryEmbedding
 from native_sparse_attention.module.kv_cache import KVCache
@@ -90,8 +92,20 @@ class SelfAttention(torch.nn.Module):
         # do rope for query and compressed key
         q = self.rope(q, cu_seqlens)
         k = self.rope(k, cu_seqlens)
-
-        # self attention
+        head_num = q.shape[1]
+        atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
+        attn_output = torch_npu.npu_fusion_attention(
+            q, k, v, head_num,
+            pse=None,
+            padding_mask=None,
+            atten_mask=atten_mask_npu,
+            scale=1.0 / math.sqrt(q.shape[-1]),
+            keep_prob=1,
+            input_layout="TND",
+            actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+            actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+            sparse_mode=3)[0]
+        """ # self attention
         attn_output = flash_attn_varlen_func(
             q,
             k,
@@ -101,7 +115,7 @@ class SelfAttention(torch.nn.Module):
             seqlens.max().item(),
             seqlens.max().item(),
             causal=True,
-        )
+        ) """
 
         # rearrange and output proj
         attn_output = rearrange(attn_output, "n h d -> n (h d)")
@@ -143,16 +157,19 @@ class SelfAttention(torch.nn.Module):
         if step == 0:
             cu_seqlens_q = cu_seqlens_k = cu_seqlens
             max_seqlen_in_batch_q = max_seqlen_in_batch_k = seqlens.max().item()
-            output = flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_in_batch_q,
-                max_seqlen_k=max_seqlen_in_batch_k,
-                causal=True,
-            )
+            head_num = q.shape[1]
+            atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
+            output = torch_npu.npu_fusion_attention(
+                q, k, v, head_num,
+                pse=None,
+                padding_mask=None,
+                atten_mask=atten_mask_npu,
+                scale=1.0 / math.sqrt(q.shape[-1]),
+                keep_prob=1,
+                input_layout="TND",
+                actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                sparse_mode=3)[0]
         else:
             output = flash_attention_decode(
                 q,

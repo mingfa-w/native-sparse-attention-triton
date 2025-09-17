@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific
 import torch
+import torch_npu
 import triton
 import math
 from native_sparse_attention.ops.triton.flash_attention import (
@@ -18,11 +19,11 @@ from native_sparse_attention.ops.triton.flash_attention import (
     _flash_attention_fwd,
     _flash_attention_bwd,
 )
-from flash_attn import flash_attn_varlen_func
-from flash_attn.flash_attn_interface import (
-    _flash_attn_varlen_forward,
-    _flash_attn_varlen_backward,
-)
+# from flash_attn import flash_attn_varlen_func
+# from flash_attn.flash_attn_interface import (
+#     _flash_attn_varlen_forward,
+#     _flash_attn_varlen_backward,
+# )
 
 
 if __name__ == "__main__":
@@ -30,28 +31,43 @@ if __name__ == "__main__":
         # triton flash attention
         torch.manual_seed(42)
         q = torch.randn(
-            1000, 32, 128, dtype=torch.float16, device="cuda", requires_grad=True
+            1000, 32, 128, dtype=torch.float16, device="npu", requires_grad=True
         )
         k = torch.randn(
-            1000, 16, 128, dtype=torch.float16, device="cuda", requires_grad=True
+            1000, 16, 128, dtype=torch.float16, device="npu", requires_grad=True
         )
         v = torch.randn(
-            1000, 16, 128, dtype=torch.float16, device="cuda", requires_grad=True
+            1000, 16, 128, dtype=torch.float16, device="npu", requires_grad=True
         )
-        cu_seqlens_q = torch.Tensor([0, 100, 384, 1000]).cuda().to(torch.int32)
-        cu_seqlens_k = torch.Tensor([0, 100, 384, 1000]).cuda().to(torch.int32)
+        cu_seqlens_q = torch.Tensor([0, 100, 384, 1000]).npu().to(torch.int32)
+        cu_seqlens_k = torch.Tensor([0, 100, 384, 1000]).npu().to(torch.int32)
         max_seqlen_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max()
         max_seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max()
-        o = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            causal=causal,
-        )
+        head_num = q.shape[1]
+        if causal:
+            atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).bool().to("npu")
+            o = torch_npu.npu_fusion_attention(
+                q, k, v, head_num,
+                pse=None,
+                padding_mask=None,
+                 atten_mask=atten_mask_npu,
+                scale=1.0 / math.sqrt(q.shape[-1]),
+                keep_prob=1,
+                input_layout="TND",
+                actual_seq_qlen=tuple(cu_seqlens_q[1:].cpu().numpy().tolist()),
+                actual_seq_kvlen=tuple(cu_seqlens_k[1:].cpu().numpy().tolist()),
+                sparse_mode=3)[0]
+        else:
+            o = torch_npu.npu_fusion_attention(
+                    q, k, v, head_num,
+                    pse=None,             
+                    atten_mask=None,
+                    scale=1.0 / math.sqrt(q.shape[-1]),
+                    keep_prob=1,
+                    input_layout="TND",
+                    actual_seq_qlen=tuple(cu_seqlens_q[1:].cpu().numpy().tolist()),
+                    actual_seq_kvlen=tuple(cu_seqlens_k[1:].cpu().numpy().tolist()))[0]
+        
         randn = torch.randn_like(o)
         loss = (o * randn).sum()
         loss.backward()
@@ -122,41 +138,49 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, H, D, provider):
-        q = torch.randn((N, H, D), device="cuda", dtype=torch.bfloat16)
-        k = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        v = torch.randn((N, H // 16, D), device="cuda", dtype=torch.bfloat16)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        q = torch.randn((N, H, D), device="npu", dtype=torch.bfloat16)
+        k = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        v = torch.randn((N, H // 16, D), device="npu", dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         sm_scale = 1 / math.sqrt(D)
 
         quantiles = [0.5, 0.2, 0.8]
         if provider == "flash":
+            head_num = q.shape[1]
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_varlen_forward(
-                    q,
-                    k,
-                    v,
-                    cu_seqlens,
-                    cu_seqlens,
-                    N,
-                    N,
-                    dropout_p=0.0,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                ),
+                torch_npu.npu_fusion_attention(
+                    q, k, v, head_num,
+                    pse=None,             
+                    atten_mask=None,
+                    scale=1.0 / math.sqrt(q.shape[-1]),
+                    keep_prob=1,
+                    input_layout="TND",
+                    actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
+                    actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()))[0],
                 quantiles=quantiles,
             )
         if provider == "triton-flash":
+            max_seqlen_q1 = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            max_seqlen_k1 = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attention_fwd(
-                    q, k, v, cu_seqlens, cu_seqlens, N, N, True, sm_scale
-                ),
+                lambda: flash_attention_varlen(
+                        q1,
+                        k1,
+                        v1,
+                        cu_seqlens,
+                        cu_seqlens,
+                        max_seqlen_q1,
+                        max_seqlen_k1,
+                        causal=False,
+                    ),
                 quantiles=quantiles,
             )
         return ms, min_ms, max_ms
 
     benchmark.run(show_plots=True, print_data=True)
 
-    # benchmark
+"""  
+     # benchmark
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["N"],
@@ -222,4 +246,5 @@ if __name__ == "__main__":
             )
         return ms, min_ms, max_ms
 
-    benchmark.run(show_plots=True, print_data=True)
+    benchmark.run(show_plots=True, print_data=True) 
+    """

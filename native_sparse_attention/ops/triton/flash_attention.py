@@ -665,7 +665,7 @@ def _flash_attention_bwd(
     # compute D
     delta = torch.empty([num_o_heads, o_len], device=o.device, dtype=torch.float32)
     grid = lambda META: (triton.cdiv(o_len, META["BLOCK_SIZE_O"]), num_o_heads)
-    BLOCK_SIZE_O = 256
+    BLOCK_SIZE_O = 128
     BLOCK_SIZE_VD = triton.next_power_of_2(v_head_dim)
     num_warps, num_stages = get_num_warps_stages(
         max(qk_head_dim, v_head_dim), BLOCK_SIZE_O, IS_HOPPER_GPU

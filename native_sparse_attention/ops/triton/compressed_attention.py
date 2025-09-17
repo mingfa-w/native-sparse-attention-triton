@@ -574,8 +574,8 @@ def _compressed_attention_fwd(
         num_q_heads,
         triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
     )
-    BLOCK_SIZE_Q = 128
-    BLOCK_SIZE_K = 128
+    BLOCK_SIZE_Q = 64
+    BLOCK_SIZE_K = 64
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_Q, IS_HOPPER_GPU)
     forward_kernel[grid](
@@ -638,7 +638,7 @@ def _compressed_attention_bwd(
     # compute D
     delta = torch.zeros([num_o_heads, o_len], device=o.device, dtype=torch.float32)
     grid = lambda META: (triton.cdiv(o_len, META["BLOCK_SIZE_O"]), num_o_heads)
-    BLOCK_SIZE_O = 256
+    BLOCK_SIZE_O = 128
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_O, IS_HOPPER_GPU)
     backward_sum_o_do[grid](
@@ -990,8 +990,8 @@ def _get_attention_score(
         triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
         triton.cdiv(max_seqlen_k, META["BLOCK_SIZE_K"]),
     )
-    BLOCK_SIZE_Q = 128
-    BLOCK_SIZE_K = 128
+    BLOCK_SIZE_Q = 64
+    BLOCK_SIZE_K = 64
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     score_kernel[grid](
         q,

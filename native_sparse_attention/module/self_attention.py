@@ -39,7 +39,7 @@ class SelfAttention(torch.nn.Module):
         num_kv_heads: int,
         head_dim: int,
         rope_config: RopeConfig,
-        rope_device: str = "cuda",
+        rope_device: str = "npu",
     ):
         super().__init__()
         # configs

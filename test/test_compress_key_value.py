@@ -21,10 +21,10 @@ if __name__ == "__main__":
     head_dim = 192
     kernel_size = 32
     kernel_stride = 16
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().cuda()
+    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
@@ -33,21 +33,21 @@ if __name__ == "__main__":
     x = (
         torch.zeros(cu_seqlens[-1], num_heads, head_dim)
         .uniform_(-1, 1)
-        .cuda()
+        .npu()
         .bfloat16()
         .requires_grad_()
     )
     w = (
         torch.zeros(num_heads, kernel_size * head_dim, head_dim)
         .uniform_(-1, 1)
-        .cuda()
+        .npu()
         .bfloat16()
         .requires_grad_()
     )
     pe = (
         torch.zeros(num_heads, kernel_size, head_dim)
         .uniform_(-1, 1)
-        .cuda()
+        .npu()
         .bfloat16()
         .requires_grad_()
     )
@@ -80,17 +80,17 @@ if __name__ == "__main__":
     )
     def benchmark(N, H, D, provider):
         K, S = 32, 16
-        x = torch.zeros(N, H, D, device="cuda", dtype=torch.bfloat16).uniform_(-1, 1)
-        w = torch.zeros(H, K * D, D, device="cuda", dtype=torch.bfloat16).uniform_(
+        x = torch.zeros(N, H, D, device="npu", dtype=torch.bfloat16).uniform_(-1, 1)
+        w = torch.zeros(H, K * D, D, device="npu", dtype=torch.bfloat16).uniform_(
             -1, 1
         )
-        pe = torch.zeros(H, K, D, device="cuda", dtype=torch.bfloat16).uniform_(-1, 1)
-        cu_seqlens_b1 = torch.LongTensor([0, N]).int().cuda()
+        pe = torch.zeros(H, K, D, device="npu", dtype=torch.bfloat16).uniform_(-1, 1)
+        cu_seqlens_b1 = torch.LongTensor([0, N]).int().npu()
         cu_seqlens_b8 = (
-            torch.LongTensor([N // 8 if i > 0 else 0 for i in range(9)]).int().cuda()
+            torch.LongTensor([N // 8 if i > 0 else 0 for i in range(9)]).int().npu()
         )
         cu_seqlens_b32 = (
-            torch.LongTensor([N // 32 if i > 0 else 0 for i in range(33)]).int().cuda()
+            torch.LongTensor([N // 32 if i > 0 else 0 for i in range(33)]).int().npu()
         )
         cu_seqlens_b1 = cu_seqlens_b1.cumsum(0).to(torch.int32)
         cu_seqlens_b8 = cu_seqlens_b8.cumsum(0).to(torch.int32)

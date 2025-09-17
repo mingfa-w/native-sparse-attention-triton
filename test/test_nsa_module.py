@@ -48,7 +48,7 @@ if __name__ == "__main__":
                 },
             ),
         )
-        .cuda()
+        .npu()
         .to(torch.bfloat16)
     )
     print("======= Init Moduel: Native Sparse Attention =======\n")
@@ -56,15 +56,15 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([4000, 8192, 16384]).int().cuda()
+    seqlens = torch.LongTensor([4000, 8192, 16384]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
     ).to(torch.int32)
-    x = torch.zeros(cu_seqlens[-1], 8192, device="cuda", dtype=torch.bfloat16).uniform_(
+    x = torch.zeros(cu_seqlens[-1], 8192, device="npu", dtype=torch.bfloat16).uniform_(
         -1, 1
     )
 
@@ -101,7 +101,7 @@ if __name__ == "__main__":
                 },
             ),
         )
-        .cuda()
+        .npu()
         .to(torch.bfloat16)
     )
 
@@ -119,8 +119,8 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, provider):
-        x = torch.randn(N, 8192, device="cuda", dtype=torch.bfloat16)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        x = torch.randn(N, 8192, device="npu", dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         quantiles = [0.5, 0.2, 0.8]
         with torch.no_grad():
             if provider == "Self-Attention":
@@ -151,8 +151,8 @@ if __name__ == "__main__":
         )
     )
     def benchmark(N, provider):
-        x = torch.randn(N, 8192, device="cuda", dtype=torch.bfloat16)
-        cu_seqlens = torch.tensor([0, N], device="cuda", dtype=torch.int32)
+        x = torch.randn(N, 8192, device="npu", dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, N], device="npu", dtype=torch.int32)
         quantiles = [0.5, 0.2, 0.8]
         if provider == "Self-Attention":
             loss = SelfAttn(x.clone().detach().requires_grad_(), cu_seqlens).mean()

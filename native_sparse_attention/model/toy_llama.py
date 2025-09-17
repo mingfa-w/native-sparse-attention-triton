@@ -192,7 +192,7 @@ class ToyLlama(nn.Module):
                     num_kv_heads=self.config.num_key_value_heads,
                     head_dim=self.config.head_dim,
                     dtype=torch.bfloat16,
-                    device="cuda",
+                    device="npu",
                 )
                 for _ in range(self.config.num_hidden_layers)
             ]
@@ -255,18 +255,18 @@ if __name__ == "__main__":
         max_length=8192,
         max_new_tokens=128,
     )
-    model = ToyLlama(config, inference_config).cuda().bfloat16()
+    model = ToyLlama(config, inference_config).npu().bfloat16()
     print(f"\nMODEL CONFIG:\n{config}\n")
     print(f"\nINFERENCE CONFIG:\n{inference_config}\n")
     print(f"\nMODEL:\n{model}\n")
 
     # example input
     batch_size = 4
-    seqlens = torch.randint(0, 4096, (batch_size,), dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
+    seqlens = torch.randint(0, 4096, (batch_size,), dtype=torch.int32, device="npu")
+    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device="npu")
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     input_ids = torch.randint(
-        0, 128288, (cu_seqlens[-1],), dtype=torch.int64, device="cuda"
+        0, 128288, (cu_seqlens[-1],), dtype=torch.int64, device="npu"
     )
     print(f"\nEXAMPLE INPUT:\ncu_seqlens: {cu_seqlens}\ninput_ids: {input_ids.shape}\n")
 

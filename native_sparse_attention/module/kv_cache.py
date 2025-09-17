@@ -133,7 +133,7 @@ class NSACache:
         kernel_stride (int): kernel stride ofr compression
         window_size (int): window size for sliding window attention
         dtype (torch.dtype): data type for kv cache, should be same as model weight dtype
-        device (Union[str, torch.device]): default to 'cuda'
+        device (Union[str, torch.device]): default to 'npu'
 
     Methods:
         reset: reset kv cache, should be called before prefilling
@@ -151,7 +151,7 @@ class NSACache:
         kernel_stride: int,
         window_size: int,
         dtype: torch.dtype,
-        device: Union[str, torch.device] = "cuda",
+        device: Union[str, torch.device] = "npu",
     ):
         self.max_batch_size = max_batch_size
         self.max_length = max_length

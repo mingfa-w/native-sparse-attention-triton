@@ -373,10 +373,10 @@ if __name__ == "__main__":
     head_dim = 128
     kernel_size = 32
     kernel_stride = 16
-    seqlens = torch.LongTensor([12, 1000, 2000, 4096]).int().cuda()
+    seqlens = torch.LongTensor([12, 1000, 2000, 4096]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
@@ -386,13 +386,13 @@ if __name__ == "__main__":
         torch.zeros(cu_seqlens[-1], num_heads, head_dim)
         .uniform_(-1, 1)
         .to(torch.bfloat16)
-        .cuda()
+        .npu()
         .requires_grad_()
     )
     w = (
         torch.zeros(num_heads, kernel_size)
         .uniform_(-1 / 32, 1 / 32)
-        .cuda()
+        .npu()
         .to(torch.bfloat16)
         .requires_grad_()
     )

@@ -27,19 +27,19 @@ if __name__ == "__main__":
             "rope_type": "llama3",
         },
     )
-    rope = RotaryEmbedding(rope_config, "cuda")
+    rope = RotaryEmbedding(rope_config, "npu")
 
     # random input
     torch.manual_seed(42)
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().cuda()
+    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
     cu_seqlens = torch.cat(
         [
-            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(1, dtype=torch.int32, device="npu"),
             torch.cumsum(seqlens, dim=0),
         ],
         dim=0,
     ).to(torch.int32)
     x = torch.zeros(
-        cu_seqlens[-1], 32, 128, device="cuda", dtype=torch.bfloat16
+        cu_seqlens[-1], 32, 128, device="npu", dtype=torch.bfloat16
     ).uniform_(-1, 1)
     y = rope(x, cu_seqlens)

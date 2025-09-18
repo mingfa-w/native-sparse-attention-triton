@@ -596,8 +596,8 @@ def _flash_attention_fwd(
         num_q_heads,
         triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
     )
-    BLOCK_SIZE_Q = 128
-    BLOCK_SIZE_K = 64
+    BLOCK_SIZE_Q = 32
+    BLOCK_SIZE_K = 32
     BLOCK_SIZE_KD = triton.next_power_of_2(qk_head_dim)
     BLOCK_SIZE_VD = triton.next_power_of_2(v_head_dim)
     num_warps, num_stages = get_num_warps_stages(
@@ -712,8 +712,8 @@ def _flash_attention_bwd(
         num_q_heads,
         triton.cdiv(max_seqlen_k, META["BLOCK_SIZE_K"]),
     )
-    BLOCK_SIZE_Q = 64
-    BLOCK_SIZE_K = 64
+    BLOCK_SIZE_Q = 32
+    BLOCK_SIZE_K = 32
     BLOCK_SIZE_KD = triton.next_power_of_2(qk_head_dim)
     BLOCK_SIZE_VD = triton.next_power_of_2(v_head_dim)
     num_warps, num_stages = get_num_warps_stages(
@@ -777,8 +777,8 @@ def _flash_attention_bwd(
         num_q_heads,
         triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
     )
-    BLOCK_SIZE_Q = 64 if max(qk_head_dim, v_head_dim) > 128 else 128
-    BLOCK_SIZE_K = 64
+    BLOCK_SIZE_Q = 32 if max(qk_head_dim, v_head_dim) > 128 else 128
+    BLOCK_SIZE_K = 32
     num_warps, num_stages = get_num_warps_stages(
         max(qk_head_dim, v_head_dim), BLOCK_SIZE_Q, IS_HOPPER_GPU
     )

@@ -334,7 +334,7 @@ def backward_dkdv(
     d_ptrs = tl.make_block_ptr(
         base=d_ptr + q_start * stride_dn + pid_h * stride_dh,
         shape=(1, q_len),
-        strides=(0, stride_dn),
+        strides=(1, stride_dn),
         offsets=(0, q_lo),
         block_shape=(1, BLOCK_SIZE_Q),
         order=(1, 0),
@@ -342,7 +342,7 @@ def backward_dkdv(
     lse_ptrs = tl.make_block_ptr(
         base=lse_ptr + q_start * stride_ln + pid_h * stride_lh,
         shape=(1, q_len),
-        strides=(0, stride_ln),
+        strides=(1, stride_ln),
         offsets=(0, q_lo),
         block_shape=(1, BLOCK_SIZE_Q),
         order=(0, 1),

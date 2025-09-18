@@ -673,8 +673,8 @@ def _compressed_attention_bwd(
         num_q_heads,
         triton.cdiv(max_seqlen_k, META["BLOCK_SIZE_K"]),
     )
-    BLOCK_SIZE_Q = 64
-    BLOCK_SIZE_K = 128
+    BLOCK_SIZE_Q = 32
+    BLOCK_SIZE_K = 32
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_K, IS_HOPPER_GPU)
     backward_dkdv[grid](
@@ -733,8 +733,8 @@ def _compressed_attention_bwd(
         num_q_heads,
         triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
     )
-    BLOCK_SIZE_Q = 128
-    BLOCK_SIZE_K = 64
+    BLOCK_SIZE_Q = 32
+    BLOCK_SIZE_K = 32
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_Q, IS_HOPPER_GPU)
     backward_dq[grid](
         q,

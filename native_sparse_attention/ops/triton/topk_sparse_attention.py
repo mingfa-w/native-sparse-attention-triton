@@ -127,8 +127,9 @@ def forward_kernel(
         # sparse attention
         for i in range(real_topk):
             # get current block start index
-            c = tl.load(t_ptr_j).to(tl.int32) * BLOCK_SIZE_K
-            t_ptr_j = t_ptr_j + stride_tk
+            t_ptr_j2 = t_ptr + (q_start + pid_q_j) * stride_tn + pid_kh * stride_th + i * stride_tk
+            c = tl.load(t_ptr_j2).to(tl.int32) * BLOCK_SIZE_K
+            # t_ptr_j = t_ptr_j + stride_tk
             # load k
             k = tl.load(
                 tl.advance(k_ptrs, (0, c)), boundary_check=(1, 0), padding_option="zero"

@@ -251,13 +251,13 @@ def count_kernel(
     # loop
     for i in range(0, seq_len, BLOCK_SIZE_N):
         x = tl.load(
-            x_ptrs,
+            x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * BLOCK_SIZE_N * stride_xn,
             mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :],
             other=-1,
         )
         x = tl.ravel(x)
         y += tl.histogram(x, BLOCK_SIZE_R)
-        x_ptrs += BLOCK_SIZE_N * stride_xn
+        # x_ptrs += BLOCK_SIZE_N * stride_xn
     # store result
     off_r = tl.arange(0, BLOCK_SIZE_R)
     y_ptr = y_ptr + pid_h * stride_yh + blocks_start * stride_yn
@@ -800,8 +800,9 @@ def backward_dq(
         # sparse
         for i in range(real_topk):
             # get current block start index
-            c = tl.load(t_ptr_j).to(tl.int32) * BLOCK_SIZE_K
-            t_ptr_j = t_ptr_j + stride_tk
+            t_ptr_j2 = t_ptr_j + stride_tk * i
+            c = tl.load(t_ptr_j2).to(tl.int32) * BLOCK_SIZE_K
+            # t_ptr_j = t_ptr_j + stride_tk
             # load
             k = tl.load(
                 tl.advance(k_ptrs, (c, 0)), boundary_check=(1, 0), padding_option="zero"

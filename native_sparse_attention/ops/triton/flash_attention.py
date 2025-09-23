@@ -90,29 +90,29 @@ def forward_kernel(
         block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_KD),
         order=(1, 0),
     )
-    k_ptrs = tl.make_block_ptr(
-        base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
-        shape=(qk_head_dim, k_len),
-        strides=(stride_kd, stride_kn),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_KD, BLOCK_SIZE_K),
-        order=(0, 1),
-    )
-    v_ptrs = tl.make_block_ptr(
-        base=v_ptr + k_start * stride_vn + pid_kh * stride_vh,
-        shape=(k_len, v_head_dim),
-        strides=(stride_vn, stride_vd),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_VD),
-        order=(1, 0),
-    )
+    # k_ptrs = tl.make_block_ptr(
+    #     base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
+    #     shape=(qk_head_dim, k_len),
+    #     strides=(stride_kd, stride_kn),
+    #     offsets=(0, 0),
+    #     block_shape=(BLOCK_SIZE_KD, BLOCK_SIZE_K),
+    #     order=(0, 1),
+    # )
+    # v_ptrs = tl.make_block_ptr(
+    #     base=v_ptr + k_start * stride_vn + pid_kh * stride_vh,
+    #     shape=(k_len, v_head_dim),
+    #     strides=(stride_vn, stride_vd),
+    #     offsets=(0, 0),
+    #     block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_VD),
+    #     order=(1, 0),
+    # )
     # load q
     q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
     # init statistics
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q
     off_k = tl.arange(0, BLOCK_SIZE_K)
-    m_i = tl.full((BLOCK_SIZE_Q,), float("-1e30"), dtype=tl.float32)
-    lse_i = tl.full((BLOCK_SIZE_Q,), float("-1e30"), dtype=tl.float32)
+    m_i = tl.full((BLOCK_SIZE_Q,), float("-inf"), dtype=tl.float32)
+    lse_i = tl.full((BLOCK_SIZE_Q,), float("-inf"), dtype=tl.float32)
     acc_o = tl.full((BLOCK_SIZE_Q, BLOCK_SIZE_VD), 0, dtype=tl.float32)
     # full attention or causal attention
     lo = 0
@@ -121,15 +121,31 @@ def forward_kernel(
     else:
         hi = k_len
     for i in range(lo, hi, BLOCK_SIZE_K):
+        k_ptrs = tl.make_block_ptr(
+            base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
+            shape=(qk_head_dim, k_len),
+            strides=(stride_kd, stride_kn),
+            offsets=(0, i),
+            block_shape=(BLOCK_SIZE_KD, BLOCK_SIZE_K),
+            order=(0, 1),
+        )
+        v_ptrs = tl.make_block_ptr(
+            base=v_ptr + k_start * stride_vn + pid_kh * stride_vh,
+            shape=(k_len, v_head_dim),
+            strides=(stride_vn, stride_vd),
+            offsets=(i, 0),
+            block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_VD),
+            order=(1, 0),
+        )
         i = tl.multiple_of(i, BLOCK_SIZE_K)
         # load k
         k = tl.load(k_ptrs, boundary_check=(1, 0), padding_option="zero")
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
         if causal:
-            qk += tl.where(off_q[:, None] >= (i + off_k)[None, :], 0, float("-1e30"))
+            qk += tl.where(off_q[:, None] >= (i + off_k)[None, :], 0, float("-inf"))
         else:
-            qk += tl.where((off_k < k_len - i)[None, :], 0, float("-1e30"))
+            qk += tl.where((off_k < k_len - i)[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * qk_scale
         # compute m_ij and l_ij
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
@@ -146,8 +162,8 @@ def forward_kernel(
         m_i = m_ij
         lse_i = m_ij + tl.math.log2(tl.exp2(lse_i - m_ij) + l_ij)
         # update ptrs
-        k_ptrs = tl.advance(k_ptrs, (0, BLOCK_SIZE_K))
-        v_ptrs = tl.advance(v_ptrs, (BLOCK_SIZE_K, 0))
+        # k_ptrs = tl.advance(k_ptrs, (0, BLOCK_SIZE_K))
+        # v_ptrs = tl.advance(v_ptrs, (BLOCK_SIZE_K, 0))
     # final scale
     acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
     # save output

@@ -110,7 +110,7 @@ def forward_kernel(
     off_k = tl.arange(0, BLOCK_SIZE_K) * kernel_stride + kernel_size - 1
     m_i = tl.full((BLOCK_SIZE_Q,), float("-inf"), dtype=tl.float32)
     lse_i = tl.full((BLOCK_SIZE_Q,), float("-inf"), dtype=tl.float32)
-    acc_o = tl.full((BLOCK_SIZE_Q, BLOCK_SIZE_D), 0, dtype=tl.float32)
+    acc_o = tl.full((BLOCK_SIZE_Q, BLOCK_SIZE_D), 0.0, dtype=tl.float32)
     # attention
     lo = 0
     hi = min(k_len, (q_start_in_seq + BLOCK_SIZE_Q - kernel_size) // kernel_stride + 1)
@@ -144,15 +144,21 @@ def forward_kernel(
     # final scale
     acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
     # save output
-    o_ptrs = tl.make_block_ptr(
-        base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-        shape=(q_len, HEAD_DIM),
-        strides=(stride_on, stride_od),
-        offsets=(q_start_in_seq, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
-    tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # o_ptrs = tl.make_block_ptr(
+    #     base=o_ptr + q_start * stride_on + pid_h * stride_oh, # 640 656
+    #     shape=(q_len, HEAD_DIM), # (40, 16) (40, 16)
+    #     strides=(stride_on, stride_od), # (64, 1) (64, 1)
+    #     offsets=(q_start_in_seq, 0), # (15, 0) (15, 0)
+    #     block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D), # (64, 16) (64, 16)
+    #     order=(1, 0), # 这里的问题？
+    # )
+
+    Q = q_start_in_seq + tl.arange(0, BLOCK_SIZE_Q)[:, None]
+    D = tl.arange(0, BLOCK_SIZE_D)[None, :]
+    mask = (Q < q_len) & (D < HEAD_DIM)
+    ptr = o_ptr + q_start * stride_on + pid_h * stride_oh + Q * stride_on + D * stride_od
+    tl.store(ptr, acc_o.to(o_ptr.dtype.element_ty), mask=mask)
+
     # save lse
     l_ptrs = lse_ptr + q_start * stride_ln + pid_h * stride_lh + off_q * stride_ln
     tl.store(l_ptrs, lse_i, mask=off_q < q_len)
@@ -276,14 +282,19 @@ def backward_dkdv(
         block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
         order=(1, 0),
     )
-    dk_ptrs = tl.make_block_ptr(
-        base=dk_ptr + k_start * stride_dkn + pid_kh * stride_dkh + pid_sh * stride_dks,
-        shape=(k_len, HEAD_DIM),
-        strides=(stride_dkn, stride_dkd),
-        offsets=(pid_k * BLOCK_SIZE_K, 0),
-        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
+    # dk_ptrs = tl.make_block_ptr(
+    #     base=dk_ptr + k_start * stride_dkn + pid_kh * stride_dkh + pid_sh * stride_dks,
+    #     shape=(k_len, HEAD_DIM),
+    #     strides=(stride_dkn, stride_dkd),
+    #     offsets=(pid_k * BLOCK_SIZE_K, 0),
+    #     block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
+    #     order=(1, 0),
+    # )
+    Q = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[:, None]
+    D = tl.arange(0, BLOCK_SIZE_D)[None, :]
+    mask = (Q < k_len) & (D < HEAD_DIM)
+    ptr = dk_ptr + k_start * stride_dkn + pid_kh * stride_dkh + pid_sh * stride_dks + Q * stride_dkn + D * stride_dkd    
+    
     v_ptrs = tl.make_block_ptr(
         base=v_ptr + k_start * stride_vn + pid_kh * stride_vh,
         shape=(k_len, HEAD_DIM),
@@ -292,14 +303,19 @@ def backward_dkdv(
         block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
         order=(1, 0),
     )
-    dv_ptrs = tl.make_block_ptr(
-        base=dv_ptr + k_start * stride_dvn + pid_kh * stride_dvh + pid_sh * stride_dvs,
-        shape=(k_len, HEAD_DIM),
-        strides=(stride_dvn, stride_dvd),
-        offsets=(pid_k * BLOCK_SIZE_K, 0),
-        block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
+    # dv_ptrs = tl.make_block_ptr(
+    #     base=dv_ptr + k_start * stride_dvn + pid_kh * stride_dvh + pid_sh * stride_dvs,
+    #     shape=(k_len, HEAD_DIM),
+    #     strides=(stride_dvn, stride_dvd),
+    #     offsets=(pid_k * BLOCK_SIZE_K, 0),
+    #     block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_D),
+    #     order=(1, 0),
+    # )
+    Q1 = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[:, None]
+    D1 = tl.arange(0, BLOCK_SIZE_D)[None, :]
+    mask1 = (Q1 < k_len) & (D1 < HEAD_DIM)
+    ptr1 = dv_ptr + k_start * stride_dvn + pid_kh * stride_dvh + pid_sh * stride_dvs + Q1 * stride_dvn + D1 * stride_dvd    
+
     # offsets
     off_q = tl.arange(0, BLOCK_SIZE_Q)
     off_k = (
@@ -333,27 +349,39 @@ def backward_dkdv(
     )
     d_ptrs = tl.make_block_ptr(
         base=d_ptr + q_start * stride_dn + pid_h * stride_dh,
-        shape=(1, q_len),
-        strides=(1, stride_dn),
-        offsets=(0, q_lo),
-        block_shape=(1, BLOCK_SIZE_Q),
-        order=(1, 0),
+        # shape=(1, q_len),
+        # strides=(1, stride_dn),
+        # offsets=(0, q_lo),
+        # block_shape=(1, BLOCK_SIZE_Q),
+        # order=(1, 0),
+        shape=(q_len,),
+        strides=(stride_dn,),
+        offsets=(q_lo,),
+        block_shape=(BLOCK_SIZE_Q,),
+        order=(0,),
     )
     lse_ptrs = tl.make_block_ptr(
         base=lse_ptr + q_start * stride_ln + pid_h * stride_lh,
-        shape=(1, q_len),
-        strides=(1, stride_ln),
-        offsets=(0, q_lo),
-        block_shape=(1, BLOCK_SIZE_Q),
-        order=(0, 1),
+        # shape=(1, q_len),
+        # strides=(1, stride_ln),
+        # offsets=(0, q_lo),
+        # block_shape=(1, BLOCK_SIZE_Q),
+        # order=(0, 1),
+        shape=(q_len,),
+        strides=(stride_ln,),
+        offsets=(q_lo,),
+        block_shape=(BLOCK_SIZE_Q,),
+        order=(0,),
     )
     # loop for q blocks
     for i in range(q_lo, q_len, BLOCK_SIZE_Q):
         # load
         q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
         do = tl.load(do_ptrs, boundary_check=(0, 1), padding_option="zero")
-        lse = tl.load(lse_ptrs, boundary_check=(0, 1), padding_option="zero")
-        d = tl.load(d_ptrs, boundary_check=(0, 1), padding_option="zero")
+        # lse = tl.load(lse_ptrs, boundary_check=(0, 1), padding_option="zero")
+        # d = tl.load(d_ptrs, boundary_check=(0, 1), padding_option="zero")
+        lse = tl.load(lse_ptrs, boundary_check=(0,), padding_option="zero")[None,:]
+        d = tl.load(d_ptrs, boundary_check=(0,), padding_option="zero")[None,:]
         # compute qk
         # [BLOCK_SIZE_K, HEAD_DIM] @ [HEAD_DIM, BLOCK_SIE_Q] -> [BLOCK_SIZE_K, BLOCK_SIE_Q]
         qk = tl.where(off_k[:, None] <= (off_q + i)[None, :], float(0.0), float("-inf"))
@@ -374,11 +402,15 @@ def backward_dkdv(
         # increment pointers
         q_ptrs = tl.advance(q_ptrs, (0, BLOCK_SIZE_Q))
         do_ptrs = tl.advance(do_ptrs, (0, BLOCK_SIZE_Q))
-        lse_ptrs = tl.advance(lse_ptrs, (0, BLOCK_SIZE_Q))
-        d_ptrs = tl.advance(d_ptrs, (0, BLOCK_SIZE_Q))
+        # lse_ptrs = tl.advance(lse_ptrs, (0, BLOCK_SIZE_Q))
+        # d_ptrs = tl.advance(d_ptrs, (0, BLOCK_SIZE_Q))
+        lse_ptrs = tl.advance(lse_ptrs, (BLOCK_SIZE_Q,))
+        d_ptrs = tl.advance(d_ptrs, (BLOCK_SIZE_Q,))
     # save dk dv
-    tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(ptr, dk.to(dk_ptr.dtype.element_ty), mask=mask)
+    tl.store(ptr1, dv.to(dv_ptr.dtype.element_ty), mask=mask1)
 
 
 @triton.jit
@@ -450,14 +482,18 @@ def backward_dq(
         block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D),
         order=(1, 0),
     )
-    dq_ptrs = tl.make_block_ptr(
-        base=dq_ptr + q_start * stride_dqn + pid_h * stride_dqh,
-        shape=(q_len, HEAD_DIM),
-        strides=(stride_dqn, stride_dqd),
-        offsets=(q_start_in_seq, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D),
-        order=(1, 0),
-    )
+    # dq_ptrs = tl.make_block_ptr(
+    #     base=dq_ptr + q_start * stride_dqn + pid_h * stride_dqh,
+    #     shape=(q_len, HEAD_DIM),
+    #     strides=(stride_dqn, stride_dqd),
+    #     offsets=(q_start_in_seq, 0),
+    #     block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D),
+    #     order=(1, 0),
+    # )
+    Q1 = q_start_in_seq + tl.arange(0, BLOCK_SIZE_Q)[:, None]
+    D1 = tl.arange(0, BLOCK_SIZE_D)[None, :]
+    mask1 = (Q1 < q_len) & (D1 < HEAD_DIM)
+    ptr1 = dq_ptr + q_start * stride_dqn + pid_h * stride_dqh + Q1 * stride_dqn + D1 * stride_dqd    
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
         shape=(k_len, HEAD_DIM),
@@ -532,7 +568,8 @@ def backward_dq(
         k_ptrs = tl.advance(k_ptrs, (BLOCK_SIZE_K, 0))
         v_ptrs = tl.advance(v_ptrs, (0, BLOCK_SIZE_K))
     # save dq
-    tl.store(dq_ptrs, dq.to(dq_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # tl.store(dq_ptrs, dq.to(dq_ptr.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(ptr1, dq.to(dq_ptr.dtype.element_ty), mask=mask1)
 
 
 def _compressed_attention_fwd(
@@ -940,15 +977,19 @@ def score_kernel(
         # compute score
         s += tl.where(causal_mask, tl.exp2(qk - lse), 0)
     # save output
-    s_ptrs = tl.make_block_ptr(
-        base=s_ptr + pid_kh * stride_sh + q_start * stride_sq,
-        shape=(q_len, k_len),
-        strides=(stride_sq, stride_sk),
-        offsets=(pid_q * BLOCK_SIZE_Q, pid_k * BLOCK_SIZE_K),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_K),
-        order=(1, 0),
-    )
-    tl.store(s_ptrs, s.to(s_ptr.dtype.element_ty), boundary_check=(0, 1))
+    # s_ptrs = tl.make_block_ptr(
+    #     base=s_ptr + pid_kh * stride_sh + q_start * stride_sq,
+    #     shape=(q_len, k_len),
+    #     strides=(stride_sq, stride_sk),
+    #     offsets=(pid_q * BLOCK_SIZE_Q, pid_k * BLOCK_SIZE_K),
+    #     block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_K),
+    #     order=(1, 0),
+    # )
+    Q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)[:, None]
+    D = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[None, :]
+    mask = (Q < q_len) & (D < k_len)
+    ptr = s_ptr + pid_kh * stride_sh + q_start * stride_sq + Q * stride_sq + D * stride_sk
+    tl.store(ptr, s.to(s_ptr.dtype.element_ty), mask=mask)
 
 
 def _get_attention_score(

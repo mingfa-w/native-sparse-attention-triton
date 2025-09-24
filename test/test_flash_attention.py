@@ -124,7 +124,7 @@ if __name__ == "__main__":
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["N"],
-            x_vals=[1024 * 2**i for i in range(1, 6)],
+            x_vals=[512 * 2**i for i in range(1, 4)],
             line_arg="provider",
             line_vals=["flash", "triton-flash"],
             line_names=[
@@ -148,7 +148,7 @@ if __name__ == "__main__":
         if provider == "flash":
             head_num = q.shape[1]
             ms, min_ms, max_ms = triton.testing.do_bench(
-                torch_npu.npu_fusion_attention(
+                lambda: torch_npu.npu_fusion_attention(
                     q, k, v, head_num,
                     pse=None,             
                     atten_mask=None,

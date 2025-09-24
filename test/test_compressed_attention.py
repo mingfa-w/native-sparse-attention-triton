@@ -147,7 +147,7 @@ if __name__ == "__main__":
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["N"],
-            x_vals=[1024 * 2**i for i in range(1, 8)],
+            x_vals=[512 * 2**i for i in range(1, 4)],
             line_arg="provider",
             line_vals=[
                 "flash",
@@ -194,7 +194,7 @@ if __name__ == "__main__":
                 actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
                 sparse_mode=3)[0],
                 quantiles=quantiles,
-            ),
+            )
              
         if provider == "triton-flash":
             ms, min_ms, max_ms = triton.testing.do_bench(

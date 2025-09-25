@@ -238,6 +238,7 @@ def count_kernel(
     # get start and len after rmpad
     seq_start = tl.load(cu_seqlens + pid_b)
     seq_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    # breakpoint()
     blocks_start = tl.load(cu_seqblocks + pid_b)
     num_blocks = tl.load(cu_seqblocks + pid_b + 1) - blocks_start
     # load x
@@ -639,17 +640,21 @@ def backward_dkdv(
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
         qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
-        qk += tl.dot(q, k.T) * qk_scale
+        k_T = tl.trans(k)
+        qk += tl.dot(q, k_T) * qk_scale
         # compute p, ds
         p = tl.exp2(qk - lse)
-        dp = tl.dot(do, v.T)
+        v_T = tl.trans(v)
+        dp = tl.dot(do, v_T)
         ds = sm_scale * p * (dp - d)
         # cast dtype
         p = p.to(do.dtype)
         ds = ds.to(q.dtype)
         # update dk and dv
-        dk += tl.dot(ds.T, q)
-        dv += tl.dot(p.T, do)
+        ds_T = tl.trans(ds)
+        dk += tl.dot(ds_T, q)
+        p_T = tl.trans(p)
+        dv += tl.dot(p_T, do)
     # save dk dv
     tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))

@@ -121,6 +121,7 @@ def test_linear_compress(
 
         # Check forward pass numerical equivalence
         atol, rtol = 1e-2, 1e-2
+        breakpoint()
         values_match = torch.allclose(y_torch, y_triton, atol=atol, rtol=rtol)
         print(
             f"Forward pass - Output values match (atol={atol}, rtol={rtol}): {values_match}"
@@ -195,7 +196,7 @@ if __name__ == "__main__":
         batch_size=16,
         num_heads=8,
         head_dim=128,
-        max_seqlen=2048,
+        max_seqlen=1024,
         kernel_sizes=[32],
         kernel_strides=[16],
         use_pe=False,

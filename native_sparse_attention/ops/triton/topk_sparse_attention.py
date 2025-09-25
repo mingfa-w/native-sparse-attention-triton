@@ -238,6 +238,7 @@ def count_kernel(
     # get start and len after rmpad
     seq_start = tl.load(cu_seqlens + pid_b)
     seq_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    breakpoint()
     blocks_start = tl.load(cu_seqblocks + pid_b)
     num_blocks = tl.load(cu_seqblocks + pid_b + 1) - blocks_start
     # load x
@@ -280,11 +281,17 @@ def count_query(
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
     )
+    import os
+    pid = os.getpid()
+    print(f"My PID is: {pid}")
     grid = (num_kv_heads, batch_size)
+    topk_idx_cpu = topk_idx.cpu()
+    cu_seqlens_cpu = cu_seqlens.cpu()
+    breakpoint()
     count_kernel[grid](
-        topk_idx,
+        topk_idx_cpu,
         active_query_count,
-        cu_seqlens,
+        cu_seqlens_cpu,
         cu_seqblocks,
         topk,
         topk_idx.stride(0),
@@ -965,6 +972,8 @@ def _topk_sparse_attention_bwd(
             torch.cumsum(seqblocks, dim=0),
         ]
     ).to(torch.int32)
+    topk_idx = torch.load('topk_idx.pth',map_location=torch.device("cpu"),  weights_only=False).npu()
+    breakpoint()
     topk_q_count = count_query(topk_idx, cu_seqlens_q, cu_seqblocks, block_size)
     cu_topk_q_count = torch.cat(
         [

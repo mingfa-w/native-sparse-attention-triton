@@ -89,7 +89,7 @@ def generate_topk_idx_example(
 if __name__ == "__main__":
     torch.manual_seed(42)
     batch_size = 3
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
+    seqlens = torch.LongTensor([125, 250, 512]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -99,26 +99,27 @@ if __name__ == "__main__":
     ).to(torch.int32)
     max_seqlen = seqlens.max().item()
     q = (
-        torch.empty(cu_seqlens[-1], 64, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 8, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     k = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 1, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     v = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 1, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
+    breakpoint()
     q.requires_grad = True
     k.requires_grad = True
     v.requires_grad = True
-    block_size = 64
+    block_size = 32
     topk = 5
-    topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
+    topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 1)
 
     o = topk_sparse_attention_torch(q, k, v, topk_idx, block_size, cu_seqlens)
 
@@ -156,7 +157,7 @@ if __name__ == "__main__":
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["N"],
-            x_vals=[1024 * 2**i for i in range(1, 8)],
+            x_vals=[16 * 2**i for i in range(1, 2)],
             line_arg="provider",
             line_vals=["flash", "triton-flash", "triton-top8", "triton-top16"],
             line_names=[

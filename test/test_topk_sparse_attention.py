@@ -89,7 +89,7 @@ def generate_topk_idx_example(
 if __name__ == "__main__":
     torch.manual_seed(42)
     batch_size = 3
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
+    seqlens = torch.LongTensor([125, 250, 512]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     k.requires_grad = True
     v.requires_grad = True
     block_size = 64
-    topk = 5
+    topk = 10
     topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
 
     o = topk_sparse_attention_torch(q, k, v, topk_idx, block_size, cu_seqlens)

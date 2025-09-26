@@ -256,7 +256,16 @@ def count_kernel(
             other=-1,
         )
         x = tl.ravel(x)
-        y += tl.histogram(x, BLOCK_SIZE_R)
+        bins = tl.arange(0, BLOCK_SIZE_R)
+        # Create comparison mask: x[i] == bins[j]
+        equal_mask = (x[:, None] == bins[None, :])  # shape: (len(x), BLOCK_SIZE_R)
+        # Only count valid indices (e.g., not -1)
+        valid_mask = (x[:, None] >= 0)
+        count_mask = tl.where(valid_mask, equal_mask, 0)
+        # Sum over the x dimension to get count per bin
+        hist = tl.sum(count_mask, axis=0)  # (BLOCK_SIZE_R,)
+        # Accumulate
+        y += hist
         # x_ptrs += BLOCK_SIZE_N * stride_xn
     # store result
     off_r = tl.arange(0, BLOCK_SIZE_R)
@@ -278,27 +287,27 @@ def count_query(
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
     BLOCK_SIZE_N = triton.next_power_of_2(4096 // BLOCK_SIZE_K)
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
-    active_query_count = torch.zeros(
+    active_query_count = torch.ones(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
     )
     grid = (num_kv_heads, batch_size)
-    count_kernel[grid](
-        topk_idx,
-        active_query_count,
-        cu_seqlens,
-        cu_seqblocks,
-        topk,
-        topk_idx.stride(0),
-        topk_idx.stride(1),
-        topk_idx.stride(2),
-        active_query_count.stride(0),
-        active_query_count.stride(1),
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        BLOCK_SIZE_R=BLOCK_SIZE_R,
-        num_warps=4,
-        num_stages=3,
-    )
+    # count_kernel[grid](
+    #     topk_idx,
+    #     active_query_count,
+    #     cu_seqlens,
+    #     cu_seqblocks,
+    #     topk,
+    #     topk_idx.stride(0),
+    #     topk_idx.stride(1),
+    #     topk_idx.stride(2),
+    #     active_query_count.stride(0),
+    #     active_query_count.stride(1),
+    #     BLOCK_SIZE_N=BLOCK_SIZE_N,
+    #     BLOCK_SIZE_K=BLOCK_SIZE_K,
+    #     BLOCK_SIZE_R=BLOCK_SIZE_R,
+    #     num_warps=4,
+    #     num_stages=3,
+    # )
     return active_query_count
 
 
@@ -860,8 +869,9 @@ def _topk_sparse_attention_fwd(
     o = torch.zeros_like(q)
     lse = torch.zeros(num_q_heads, q_len, dtype=torch.float32, device=q.device)
     # launch kernel
+    # breakpoint()
     num_q_loop = (
-        max_seqlen_q // 32768 + 1
+        max_seqlen_q // 1024 + 1
     )  # calculate multiple querys in one kernel if seqlence length is too long
     grid = (batch_size, num_k_heads, triton.cdiv(max_seqlen_q, num_q_loop))
     BLOCK_SIZE_K = triton.next_power_of_2(block_size)
@@ -935,7 +945,7 @@ def _topk_sparse_attention_bwd(
     topk = topk_idx.shape[-1]
     # compute D
     delta = torch.zeros([num_o_heads, o_len], device=o.device, dtype=torch.float32)
-    BLOCK_SIZE_O = 256
+    BLOCK_SIZE_O = 128
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_O, IS_HOPPER_GPU)
     grid = (triton.cdiv(o_len, BLOCK_SIZE_O), num_o_heads)

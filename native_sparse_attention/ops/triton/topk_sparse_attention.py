@@ -245,18 +245,28 @@ def count_kernel(
     off_k = tl.arange(0, BLOCK_SIZE_K)
     off_n = tl.arange(0, BLOCK_SIZE_N)
     x_ptr = x_ptr + pid_h * stride_xh + seq_start * stride_xn
-    x_ptrs = x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk
+    # x_ptrs = x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk
     # init y
     y = tl.zeros((BLOCK_SIZE_R,), dtype=tl.int32)
     # loop
     for i in range(0, seq_len, BLOCK_SIZE_N):
         x = tl.load(
-            x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * BLOCK_SIZE_N * stride_xn,
+            x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * stride_xn,
             mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :],
             other=-1,
         )
         x = tl.ravel(x)
-        y += tl.histogram(x, BLOCK_SIZE_R)
+        # y += tl.histogram(x, BLOCK_SIZE_R)
+        bins = tl.arange(0, BLOCK_SIZE_R)
+        # Create comparison mask: x[i] == bins[j]
+        equal_mask = (x[:, None] == bins[None, :])  # shape: (len(x), BLOCK_SIZE_R)
+        # Only count valid indices (e.g., not -1)
+        valid_mask = (x[:, None] >= 0)
+        count_mask = tl.where(valid_mask, equal_mask, 0)
+        # Sum over the x dimension to get count per bin
+        hist = tl.sum(count_mask, axis=0)  # (BLOCK_SIZE_R,)
+        # Accumulate
+        y += hist
         # x_ptrs += BLOCK_SIZE_N * stride_xn
     # store result
     off_r = tl.arange(0, BLOCK_SIZE_R)
@@ -276,7 +286,7 @@ def count_query(
     seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
     batch_size = seqlens.shape[0]
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
-    BLOCK_SIZE_N = triton.next_power_of_2(4096 // BLOCK_SIZE_K)
+    BLOCK_SIZE_N = triton.next_power_of_2(256 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
@@ -640,17 +650,17 @@ def backward_dkdv(
         # compute qk
         qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
         qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
-        qk += tl.dot(q, k.T) * qk_scale
+        qk += tl.dot(q, tl.trans(k)) * qk_scale
         # compute p, ds
         p = tl.exp2(qk - lse)
-        dp = tl.dot(do, v.T)
+        dp = tl.dot(do, tl.trans(v))
         ds = sm_scale * p * (dp - d)
         # cast dtype
         p = p.to(do.dtype)
         ds = ds.to(q.dtype)
         # update dk and dv
-        dk += tl.dot(ds.T, q)
-        dv += tl.dot(p.T, do)
+        dk += tl.dot(tl.trans(ds), q)
+        dv += tl.dot(tl.trans(p), do)
     # save dk dv
     tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))

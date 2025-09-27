@@ -871,7 +871,7 @@ def _topk_sparse_attention_fwd(
     # launch kernel
     # breakpoint()
     num_q_loop = (
-        max_seqlen_q // 1024 + 1
+        max_seqlen_q // 32768 + 1
     )  # calculate multiple querys in one kernel if seqlence length is too long
     grid = (batch_size, num_k_heads, triton.cdiv(max_seqlen_q, num_q_loop))
     BLOCK_SIZE_K = triton.next_power_of_2(block_size)

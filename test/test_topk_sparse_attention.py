@@ -99,26 +99,26 @@ if __name__ == "__main__":
     ).to(torch.int32)
     max_seqlen = seqlens.max().item()
     q = (
-        torch.empty(cu_seqlens[-1], 64, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 8, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     k = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 1, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     v = (
-        torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+        torch.empty(cu_seqlens[-1], 1, 12, device="npu")
         .uniform_(-1, 1)
         .to(torch.float16)
     )
     q.requires_grad = True
     k.requires_grad = True
     v.requires_grad = True
-    block_size = 64
-    topk = 10
-    topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
+    block_size = 32
+    topk = 5
+    topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 1)
 
     o = topk_sparse_attention_torch(q, k, v, topk_idx, block_size, cu_seqlens)
 

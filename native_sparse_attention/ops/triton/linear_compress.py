@@ -373,7 +373,7 @@ class LinearCompress(torch.autograd.Function):
         block_kernel_size = max(16, triton.next_power_of_2(kernel_size))
         block_head_dim = 8 if IS_HOPPER_GPU else 4
         block_headD_dim = 32
-        block_output_seq_size = 32
+        block_output_seq_size = 16
         w = w.reshape(num_heads, kernel_size, head_dim, head_dim).contiguous()
 
         grid = lambda META: (

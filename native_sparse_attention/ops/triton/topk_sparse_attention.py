@@ -286,7 +286,7 @@ def count_query(
     seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
     batch_size = seqlens.shape[0]
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
-    BLOCK_SIZE_N = triton.next_power_of_2(256 // BLOCK_SIZE_K)  # TODO: 256待调整
+    BLOCK_SIZE_N = triton.next_power_of_2(128 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device

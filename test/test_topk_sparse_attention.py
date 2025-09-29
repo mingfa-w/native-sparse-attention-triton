@@ -120,7 +120,7 @@ if __name__ == "__main__":
     # topk = 5
     # topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
 
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
+    seqlens = torch.LongTensor([1000, 2000, 2048]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),

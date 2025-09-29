@@ -288,27 +288,27 @@ def count_query(
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
     BLOCK_SIZE_N = triton.next_power_of_2(256 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
-    active_query_count = torch.ones(
+    active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
     )
     grid = (num_kv_heads, batch_size)
-    # count_kernel[grid](
-    #     topk_idx,
-    #     active_query_count,
-    #     cu_seqlens,
-    #     cu_seqblocks,
-    #     topk,
-    #     topk_idx.stride(0),
-    #     topk_idx.stride(1),
-    #     topk_idx.stride(2),
-    #     active_query_count.stride(0),
-    #     active_query_count.stride(1),
-    #     BLOCK_SIZE_N=BLOCK_SIZE_N,
-    #     BLOCK_SIZE_K=BLOCK_SIZE_K,
-    #     BLOCK_SIZE_R=BLOCK_SIZE_R,
-    #     num_warps=4,
-    #     num_stages=3,
-    # )
+    count_kernel[grid](
+        topk_idx,
+        active_query_count,
+        cu_seqlens,
+        cu_seqblocks,
+        topk,
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        active_query_count.stride(0),
+        active_query_count.stride(1),
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
+        BLOCK_SIZE_R=BLOCK_SIZE_R,
+        num_warps=4,
+        num_stages=3,
+    )
     return active_query_count
 
 

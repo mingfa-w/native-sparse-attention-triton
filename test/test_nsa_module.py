@@ -27,17 +27,17 @@ if __name__ == "__main__":
             hidden_size=8192,
             num_q_heads=64,
             num_kv_heads=4,
-            head_dim=128,
+            head_dim=64,
             kernel_size=32,
             kernel_stride=16,
             block_size=64,
-            topk=16,
+            topk=5,
             init_blocks=1,
             local_blocks=2,
             window_size=512,
             rope_config=RopeConfig(
                 max_position_embeddings=131072,
-                head_dim=128,
+                head_dim=64,
                 rope_theta=500000,
                 rope_scaling={
                     "factor": 8.0,
@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([4000, 8192, 16384]).int().npu()
+    seqlens = torch.LongTensor([1000, 2048, 2048]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),

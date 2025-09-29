@@ -122,10 +122,13 @@ def linear_compress_fwd_kernel(
 
         x = tl.load(x_ptrs, mask=x_mask, other=0)
         x = tl.reshape(x, (BLOCK_OUTPUT_SEQ_SIZE, BLOCK_KERNEL_SIZE * BLOCK_HEADd_DIM))
+        tl.compile_hint(x, "maybeUnCollapsibleReshape")
+
         # x : [n, k * bd]
 
         w = tl.load(w_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
         w = tl.reshape(w, (BLOCK_KERNEL_SIZE * BLOCK_HEADd_DIM, BLOCK_HEADD_DIM))
+        tl.compile_hint(w, "maybeUnCollapsibleReshape")
         # w: [k * bd, D]
 
         y_d += tl.dot(x, w)
@@ -278,6 +281,7 @@ def linear_compress_bwd_kernel(
     w = tl.load(w_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
     # w: [k, bd, D]
     w = tl.reshape(w, (BLOCK_KERNEL_SIZE * BLOCK_HEADd_DIM, BLOCK_HEADD_DIM))
+    tl.compile_hint(w, "maybeUnCollapsibleReshape")
     # w: [k * bd, D]
 
     dx = tl.dot(dy, tl.trans(w))
@@ -296,6 +300,7 @@ def linear_compress_bwd_kernel(
     # cal dw, start
     x = tl.load(x_ptrs, mask=x_mask, other=0)
     x = tl.reshape(x, (BLOCK_OUTPUT_SEQ_SIZE, BLOCK_KERNEL_SIZE * BLOCK_HEADd_DIM))
+    tl.compile_hint(x, "maybeUnCollapsibleReshape")
     # x : [by, k * bd]
 
     dw = tl.dot(tl.trans(x), dy)
@@ -368,12 +373,12 @@ class LinearCompress(torch.autograd.Function):
         block_kernel_size = max(16, triton.next_power_of_2(kernel_size))
         block_head_dim = 8 if IS_HOPPER_GPU else 4
         block_headD_dim = 32
-        block_output_seq_size = 64
+        block_output_seq_size = 16
         w = w.reshape(num_heads, kernel_size, head_dim, head_dim).contiguous()
 
         grid = lambda META: (
             batch_size * num_heads,
-            triton.cdiv(y_seqlens.max(0)[0].item(), META["BLOCK_OUTPUT_SEQ_SIZE"]),
+            triton.cdiv(y_seqlens.to(torch.int64).max(0)[0].item(), META["BLOCK_OUTPUT_SEQ_SIZE"]),
             triton.cdiv(head_dim, META["BLOCK_HEADD_DIM"]),
         )
 
@@ -444,7 +449,7 @@ class LinearCompress(torch.autograd.Function):
 
         grid = lambda META: (
             batch_size * num_heads,
-            triton.cdiv(y_seqlens.max(0)[0].item(), META["BLOCK_OUTPUT_SEQ_SIZE"]),
+            triton.cdiv(y_seqlens.to(torch.int64).max(0)[0].item(), META["BLOCK_OUTPUT_SEQ_SIZE"]),
             triton.cdiv(head_dim, META["BLOCK_HEADD_DIM"])
             * triton.cdiv(head_dim, META["BLOCK_HEADd_DIM"]),
         )

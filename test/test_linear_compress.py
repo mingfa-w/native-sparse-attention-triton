@@ -195,7 +195,7 @@ if __name__ == "__main__":
         batch_size=16,
         num_heads=8,
         head_dim=128,
-        max_seqlen=2048,
+        max_seqlen=512,
         kernel_sizes=[32],
         kernel_strides=[16],
         use_pe=False,

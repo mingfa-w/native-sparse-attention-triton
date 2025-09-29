@@ -89,7 +89,38 @@ def generate_topk_idx_example(
 if __name__ == "__main__":
     torch.manual_seed(42)
     batch_size = 3
-    seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
+    # seqlens = torch.LongTensor([1000, 2000, 4096]).int().npu()
+    # cu_seqlens = torch.cat(
+    #     [
+    #         torch.zeros(1, dtype=torch.int32, device="npu"),
+    #         torch.cumsum(seqlens, dim=0),
+    #     ],
+    #     dim=0,
+    # ).to(torch.int32)
+    # max_seqlen = seqlens.max().item()
+    # q = (
+    #     torch.empty(cu_seqlens[-1], 64, 96, device="npu")
+    #     .uniform_(-1, 1)
+    #     .to(torch.float16)
+    # )
+    # k = (
+    #     torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+    #     .uniform_(-1, 1)
+    #     .to(torch.float16)
+    # )
+    # v = (
+    #     torch.empty(cu_seqlens[-1], 8, 96, device="npu")
+    #     .uniform_(-1, 1)
+    #     .to(torch.float16)
+    # )
+    # q.requires_grad = True
+    # k.requires_grad = True
+    # v.requires_grad = True
+    # block_size = 64
+    # topk = 5
+    # topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
+
+    seqlens = torch.LongTensor([1000, 2000, 2048]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -119,6 +150,8 @@ if __name__ == "__main__":
     block_size = 64
     topk = 5
     topk_idx = generate_topk_idx_example(seqlens, block_size, topk, 8)
+    
+    ##
 
     o = topk_sparse_attention_torch(q, k, v, topk_idx, block_size, cu_seqlens)
 

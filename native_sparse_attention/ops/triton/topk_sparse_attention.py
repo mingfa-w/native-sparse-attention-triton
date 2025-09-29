@@ -286,7 +286,7 @@ def count_query(
     seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
     batch_size = seqlens.shape[0]
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
-    BLOCK_SIZE_N = triton.next_power_of_2(256 // BLOCK_SIZE_K)  # TODO: 256待调整
+    BLOCK_SIZE_N = triton.next_power_of_2(128 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
@@ -945,7 +945,7 @@ def _topk_sparse_attention_bwd(
     topk = topk_idx.shape[-1]
     # compute D
     delta = torch.zeros([num_o_heads, o_len], device=o.device, dtype=torch.float32)
-    BLOCK_SIZE_O = 256
+    BLOCK_SIZE_O = 128
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_O, IS_HOPPER_GPU)
     grid = (triton.cdiv(o_len, BLOCK_SIZE_O), num_o_heads)

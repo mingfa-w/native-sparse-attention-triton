@@ -529,7 +529,7 @@ def _fill_kv_cache(
     # no kv cache to fill
     if max_kv_len == 0:
         return
-    BLOCK_SIZE_N = min(1024, triton.next_power_of_2(max_kv_len))
+    BLOCK_SIZE_N = min(512, triton.next_power_of_2(max_kv_len))
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     grid = (2 * batch_size, num_heads, triton.cdiv(max_kv_len, BLOCK_SIZE_N))
     _fill_kv_cache_kernel[grid](

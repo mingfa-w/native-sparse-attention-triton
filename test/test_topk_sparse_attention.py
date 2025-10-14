@@ -189,12 +189,12 @@ if __name__ == "__main__":
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["N"],
-            x_vals=[1024 * 2**i for i in range(1, 8)],
+            x_vals=[512 * 2**i for i in range(1, 4)],
             line_arg="provider",
-            line_vals=["flash", "triton-flash", "triton-top8", "triton-top16"],
+            line_vals=["torch-top8", "torch-top16", "triton-top8", "triton-top16"],
             line_names=[
-                "Flash",
-                "Triton-Flash",
+                "Torch-top8",
+                "Torch-top16",
                 "Triton-Top8",
                 "Triton-Top16",
             ],
@@ -215,44 +215,30 @@ if __name__ == "__main__":
         top16_idx = generate_topk_idx_example(cu_seqlens[1:], K, 16, H // 16)
 
         quantiles = [0.5, 0.2, 0.8]
-        """  
-       if provider == "flash":
+
+        if provider == "torch-top8":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attn_varlen_forward(
-                    q,
-                    k,
-                    v,
-                    cu_seqlens,
-                    cu_seqlens,
-                    N,
-                    N,
-                    dropout_p=0.0,
-                    causal=True,
-                    softmax_scale=sm_scale,
-                ),
+                lambda: topk_sparse_attention_torch
+                   (q, k, v, top8_idx, block_size, cu_seqlens,sm_scale),
                 quantiles=quantiles,
             ) 
-        """
-        if provider == "triton-flash":
+        if provider == "torch-top16":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _flash_attention_fwd(
-                    q, k, v, cu_seqlens, cu_seqlens, N, N, True, sm_scale
-                ),
+                lambda: topk_sparse_attention_torch
+                   (q, k, v, top16_idx, block_size, cu_seqlens,sm_scale),
                 quantiles=quantiles,
-            )
+            ) 
         if provider == "triton-top8":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: 
-                _topk_sparse_attention_fwd(
-                    q, k, v, top8_idx, K, cu_seqlens, cu_seqlens, N, N, sm_scale
-                ),
+                topk_sparse_attention(
+                    q, k, v, top8_idx, block_size, cu_seqlens, sm_scale),
                 quantiles=quantiles,
             )
         if provider == "triton-top16":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: _topk_sparse_attention_fwd(
-                    q, k, v, top16_idx, K, cu_seqlens, cu_seqlens, N, N, sm_scale
-                ),
+                lambda: topk_sparse_attention(
+                    q, k, v, top16_idx, block_size, cu_seqlens,sm_scale),      
                 quantiles=quantiles,
             )
         return ms, min_ms, max_ms

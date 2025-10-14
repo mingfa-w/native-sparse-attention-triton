@@ -29,6 +29,7 @@ from native_sparse_attention.ops.triton.topk_sparse_attention import (
 # decode attention
 from native_sparse_attention.ops.triton.flash_attention_decode import (
     flash_attention_decode,
+    torch_attention_decode,
 )
 from native_sparse_attention.ops.torch.compressed_attention_decode import (
     compressed_attention_decode,
@@ -48,6 +49,7 @@ __all__ = [
     "topk_sparse_attention",
     # decode attention, no grad
     "flash_attention_decode",
+    "torch_attention_decode",
     "compressed_attention_decode",
     "topk_sparse_attention_decode",
 ]

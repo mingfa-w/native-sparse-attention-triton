@@ -181,7 +181,7 @@ def flash_attention_decode(
     num_stages = 3
     # there is a bug for triton 3.0.0 if BLOCK_SIZE_B > 16
     BLOCK_SIZE_B = min(16, triton.next_power_of_2(batch_size))
-    BLOCK_SIZE_K = 128
+    BLOCK_SIZE_K = 8
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     grid = (num_q_heads, triton.cdiv(batch_size, BLOCK_SIZE_B))
     decode_kernel[grid](

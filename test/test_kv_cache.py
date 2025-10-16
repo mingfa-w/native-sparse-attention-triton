@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torch
-from native_sparse_attention.module.kv_cache import NSACache
+from native_sparse_attention.module.kv_cache import NSACache,KVCache
 
 
 if __name__ == "__main__":
@@ -47,3 +47,23 @@ if __name__ == "__main__":
     cv = torch.randn_like(v)
     cache.prepare_compress(cu_seqlens, step, k, v)
     cache.update_kv(cu_seqlens, step, ck, cv, k, v, k, v)
+    print("update NSACache OK")
+
+
+
+     # init KVCache
+    cache = KVCache(4, 16384, num_heads, head_dim, torch.bfloat16, "npu")
+
+    # test prefill
+    step = 0
+    k = torch.randn(cu_seqlens[-1], num_heads, head_dim).npu().bfloat16()
+    v = torch.randn_like(k)
+    cache.update_kv(cu_seqlens, step,k, v)
+
+    # test decode
+    step = 1
+    k = torch.randn(batch_size, num_heads, head_dim).npu().bfloat16()
+    v = torch.randn_like(k)
+    cache.update_kv(cu_seqlens, step,k, v)
+
+    print("update KVCache OK")

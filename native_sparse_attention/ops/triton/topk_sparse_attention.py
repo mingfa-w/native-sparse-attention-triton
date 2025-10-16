@@ -286,7 +286,7 @@ def count_query(
     seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
     batch_size = seqlens.shape[0]
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
-    BLOCK_SIZE_N = triton.next_power_of_2(128 // BLOCK_SIZE_K)  # TODO: 256待调整
+    BLOCK_SIZE_N = triton.next_power_of_2(16 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
@@ -847,12 +847,14 @@ def _topk_sparse_attention_fwd(
     cu_seqlens_k: torch.Tensor,
     max_seqlen_q: int,
     max_seqlen_k: int,
-    sm_scale: float,
+    sm_scale: float,      
 ):
+    seq_chunk_size = 10240 # 可根据NPU硬件限制调整的子序列长度
     # dtype check
     assert k.dtype == q.dtype and v.dtype == q.dtype
     assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
     assert block_size in {32, 64, 128, 256}
+    
     # shape
     q_len, num_q_heads, head_dim = q.shape
     k_len, num_k_heads, head_dim = k.shape
@@ -862,63 +864,137 @@ def _topk_sparse_attention_fwd(
     topk = topk_idx.shape[-1]
     assert topk_idx.shape[0] == num_k_heads
     assert topk_idx.shape[1] == q_len
+    
     # gqa
     assert num_k_heads == num_v_heads
     assert num_q_heads % num_k_heads == 0
     num_share_q_heads = num_q_heads // num_k_heads
-    # output tensor
+    
+    # 初始化输出张量
     o = torch.zeros_like(q)
     lse = torch.zeros(num_q_heads, q_len, dtype=torch.float32, device=q.device)
-    # launch kernel
-    num_q_loop = (
-        max_seqlen_q // 32768 + 1
-    )  # calculate multiple querys in one kernel if seqlence length is too long
-    grid = (batch_size, num_k_heads, triton.cdiv(max_seqlen_q, num_q_loop))
+    
+    # 计算需要切割的子序列数量
+    num_chunks = math.ceil(max_seqlen_q / seq_chunk_size)
+    
+    # 设置块大小参数
     BLOCK_SIZE_K = triton.next_power_of_2(block_size)
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     BLOCK_SIZE_H = max(16, triton.next_power_of_2(num_share_q_heads))
     BLOCK_SIZE_T = triton.next_power_of_2(topk)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_K, IS_HOPPER_GPU)
-    forward_kernel[grid](
-        q,
-        k,
-        v,
-        topk_idx,
-        o,
-        lse,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        num_k_heads,
-        num_share_q_heads,
-        head_dim,
-        topk,
-        num_q_loop,
-        sm_scale,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        topk_idx.stride(0),
-        topk_idx.stride(1),
-        topk_idx.stride(2),
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
-        lse.stride(0),
-        lse.stride(1),
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        BLOCK_SIZE_D=BLOCK_SIZE_D,
-        BLOCK_SIZE_H=BLOCK_SIZE_H,
-        BLOCK_SIZE_T=BLOCK_SIZE_T,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    if num_chunks > 0:
+    # 分批次处理每个子序列
+        for chunk_idx in range(num_chunks):
+            # 计算当前子序列的起始和结束索引
+            start_idx = chunk_idx * seq_chunk_size
+            end_idx = min((chunk_idx + 1) * seq_chunk_size, q_len)
+            chunk_len = end_idx - start_idx
+            
+            if chunk_len == 0:
+                continue
+            
+            # 切割当前子序列的输入数据
+            q_chunk = q[start_idx:end_idx, :, :]
+            k_chunk = k[start_idx:end_idx, :, :]
+            v_chunk = v[start_idx:end_idx, :, :]
+            topk_idx_chunk = topk_idx[:, start_idx:end_idx, :]
+            
+            # 为当前子序列创建临时输出
+            o_chunk = torch.zeros_like(q_chunk)
+            lse_chunk = torch.zeros(num_q_heads, chunk_len, dtype=torch.float32, device=q.device)
+            
+            # 计算当前子序列的网格维度
+            num_q_loop = (seq_chunk_size // 32768 + 1)
+            grid = (batch_size, num_k_heads, triton.cdiv(chunk_len, num_q_loop))
+            
+            # 调用核函数处理当前子序列
+            forward_kernel[grid](
+                q_chunk,
+                k_chunk,
+                v_chunk,
+                topk_idx_chunk,
+                o_chunk,
+                lse_chunk,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                num_k_heads,
+                num_share_q_heads,
+                head_dim,
+                topk,
+                num_q_loop,
+                sm_scale,
+                q_chunk.stride(0),
+                q_chunk.stride(1),
+                q_chunk.stride(2),
+                k_chunk.stride(0),
+                k_chunk.stride(1),
+                k_chunk.stride(2),
+                v_chunk.stride(0),
+                v_chunk.stride(1),
+                v_chunk.stride(2),
+                topk_idx_chunk.stride(0),
+                topk_idx_chunk.stride(1),
+                topk_idx_chunk.stride(2),
+                o_chunk.stride(0),
+                o_chunk.stride(1),
+                o_chunk.stride(2),
+                lse_chunk.stride(0),
+                lse_chunk.stride(1),
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_D=BLOCK_SIZE_D,
+                BLOCK_SIZE_H=BLOCK_SIZE_H,
+                BLOCK_SIZE_T=BLOCK_SIZE_T,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+            
+            # 将当前子序列的结果复制到最终输出中
+            o[start_idx:end_idx, :, :] = o_chunk
+            lse[:, start_idx:end_idx] = lse_chunk
+    else:
+        grid = (batch_size, num_k_heads, triton.cdiv(max_seqlen_q, num_q_loop))
+        forward_kernel[grid](
+            q,
+            k,
+            v,
+            topk_idx,
+            o,
+            lse,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            num_k_heads,
+            num_share_q_heads,
+            head_dim,
+            topk,
+            num_q_loop,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_idx.stride(2),
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            lse.stride(0),
+            lse.stride(1),
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            BLOCK_SIZE_H=BLOCK_SIZE_H,
+            BLOCK_SIZE_T=BLOCK_SIZE_T,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
     return o, lse
+    
 
 
 def _topk_sparse_attention_bwd(

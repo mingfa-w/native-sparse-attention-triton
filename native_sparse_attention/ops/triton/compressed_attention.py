@@ -1166,10 +1166,13 @@ def transform_score(
     init_blocks: int = 1,
     local_blocks: int = 2,
 ) -> torch.Tensor:
+    seq_chunk_size=10240 # 每个子序列的最大长度，可根据NPU硬件限制调整
     num_k_heads, total_query_len, max_key_len = score.shape
     batch_size = cu_seqlens_q.shape[0] - 1
     pad_len = kernel_size // kernel_stride - 1
     max_blocks = math.ceil(max_seqlen_q / block_size)
+    
+    # 初始化最终输出
     block_score = torch.zeros(
         num_k_heads,
         total_query_len,
@@ -1177,21 +1180,90 @@ def transform_score(
         dtype=torch.float32,
         device=score.device,
     )
+    
+    # 计算需要切割的子序列数量
+    num_chunks = math.ceil(total_query_len / seq_chunk_size)
+    
+    # 生成offs（权重偏移量）- 只需计算一次
     offs = (
         torch.arange(kernel_size // kernel_stride, device=score.device)[:, None]
         + torch.arange(block_size // kernel_stride, device=score.device)[None, :]
     ).view(-1)
     offs = torch.histc(offs, bins=offs.max() + 1, min=0, max=offs.max())
     num_offs = int(offs.shape[0])
+    
+    # 设置块大小参数
     BLOCK_SIZE_K = min(128, triton.next_power_of_2(max_blocks))
     BLOCK_SIZE_O = triton.next_power_of_2(num_offs)
     BLOCK_SIZE_Q = 8
-    grid = (
+    if num_chunks > 0:
+        # 分批次处理每个子序列
+        for chunk_idx in range(num_chunks):
+            # 计算当前子序列的起始和结束索引
+            start_q = chunk_idx * seq_chunk_size
+            end_q = min((chunk_idx + 1) * seq_chunk_size, total_query_len)
+            chunk_query_len = end_q - start_q
+            
+            # 如果当前子序列长度为0，跳过
+            if chunk_query_len == 0:
+                continue
+            
+            # 切割当前子序列的score
+            score_chunk = score[:, start_q:end_q, :]
+            
+            # 为当前子序列创建临时输出
+            block_score_chunk = torch.zeros(
+                num_k_heads,
+                chunk_query_len,
+                max_blocks,
+                dtype=torch.float32,
+                device=score.device,
+            )
+            
+            # 计算当前子序列的网格维度
+            grid = (
+                num_k_heads * batch_size,
+                triton.cdiv(chunk_query_len, BLOCK_SIZE_Q),
+                triton.cdiv(max_blocks, BLOCK_SIZE_K),
+            )
+            
+            # 调用核函数处理当前子序列
+            _transform_score_kernel[grid](
+                score_chunk,
+                block_score_chunk,
+                offs,
+                cu_seqlens_q,
+                num_k_heads,
+                offs.shape[0],
+                max_key_len,
+                max_blocks,
+                pad_len,
+                block_size,
+                block_size // kernel_stride,
+                init_blocks,
+                local_blocks,
+                score_chunk.stride(0),
+                score_chunk.stride(1),
+                score_chunk.stride(2),
+                block_score_chunk.stride(0),
+                block_score_chunk.stride(1),
+                block_score_chunk.stride(2),
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_O=BLOCK_SIZE_O,
+                num_warps=8,
+                num_stages=3,
+            )
+            
+            # 将当前子序列的结果复制到最终输出中
+            block_score[:, start_q:end_q, :] = block_score_chunk
+    else:
+        grid = (
         num_k_heads * batch_size,
         triton.cdiv(total_query_len, BLOCK_SIZE_Q),
         triton.cdiv(max_blocks, BLOCK_SIZE_K),
-    )
-    _transform_score_kernel[grid](
+        )
+        _transform_score_kernel[grid](
         score,
         block_score,
         offs,
@@ -1217,6 +1289,7 @@ def transform_score(
         num_warps=8,
         num_stages=3,
     )
+    
     return block_score
 
 

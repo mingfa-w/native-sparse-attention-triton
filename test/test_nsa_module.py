@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([1000, 2048, 2048]).int().npu()
+    seqlens = torch.LongTensor([2048]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -64,6 +64,7 @@ if __name__ == "__main__":
         ],
         dim=0,
     ).to(torch.int32)
+    print(f"cu_seqlens {cu_seqlens}")
     x = torch.zeros(cu_seqlens[-1], 8192, device="npu", dtype=torch.bfloat16).uniform_(
         -1, 1
     )
@@ -81,7 +82,7 @@ if __name__ == "__main__":
             f"Backward, {name}, grad shape: {param.grad.shape}, grad norm: {param.grad.norm()}\n"
         )
 
-    # speed benchmark
+    """ # speed benchmark
     SelfAttn = (
         SelfAttention(
             hidden_size=8192,
@@ -169,3 +170,4 @@ if __name__ == "__main__":
         return ms, min_ms, max_ms
 
     benchmark.run(show_plots=True, print_data=True)
+ """

@@ -17,6 +17,7 @@ from typing import Any, Optional
 import torch
 import triton
 import triton.language as tl
+from native_sparse_attention.ops.triton import utils
 from native_sparse_attention.ops.triton.utils import get_num_warps_stages, is_hopper_gpu
 
 
@@ -233,7 +234,85 @@ def backward_sum_o_do(
     tl.store(
         delta_ptr + pid_h * stride_dh + off_o * stride_dn, delta, mask=off_o < o_len
     )
+""" @triton.jit
+def count_kernel(
+    x_ptr,  # [num_kv_heads, total_len, topk]
+    y_ptr,  # [num_kv_heads, total_blocks]
+    cu_seqlens,  # [batch_size + 1]
+    cu_seqblocks,  # [batch_size + 1]
+    topk,
+    stride_xh,
+    stride_xn,
+    stride_xk,
+    stride_yh,
+    stride_yn,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_R: tl.constexpr,
+    BLOCK_CHUNK_R: tl.constexpr,  # chunk size (e.g. 256)
+):
+    pid_h = tl.program_id(0)
+    pid_b = tl.program_id(1)
 
+    # per-batch offsets/lengths
+    seq_start = tl.load(cu_seqlens + pid_b)
+    seq_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    blocks_start = tl.load(cu_seqblocks + pid_b)
+    num_blocks = tl.load(cu_seqblocks + pid_b + 1) - blocks_start
+
+    # base pointers for this head & batch
+    x_base = x_ptr + pid_h * stride_xh + seq_start * stride_xn
+    y_base = y_ptr + pid_h * stride_yh + blocks_start * stride_yn
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_n = tl.arange(0, BLOCK_SIZE_N)
+
+    # iterate chunks along R dimension
+    chunk_start = 0
+    # precompute index vectors used repeatedly
+    off_r_full = tl.arange(0, BLOCK_CHUNK_R)  # used for masks and final store
+    bins_base_full = tl.arange(0, BLOCK_CHUNK_R)  # added to chunk_start to form bins
+
+    while chunk_start < BLOCK_SIZE_R:
+        # runtime actual effective size for this chunk (<= BLOCK_CHUNK_R)
+        this_chunk_size = tl.minimum(BLOCK_CHUNK_R, BLOCK_SIZE_R - chunk_start)
+
+        # local small histogram for this chunk (fixed-size: BLOCK_CHUNK_R)
+        hist = tl.zeros((BLOCK_CHUNK_R,), dtype=tl.int32)
+
+        # bins for this chunk: chunk_start + [0..BLOCK_CHUNK_R-1]
+        bins_base = bins_base_full + chunk_start  # shape (BLOCK_CHUNK_R,)
+
+        # iterate sequence entries and accumulate into hist
+        for i in range(0, seq_len, BLOCK_SIZE_N):
+            x = tl.load(
+                x_base + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * stride_xn,
+                mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :],
+                other=-1,
+            )
+            x = tl.ravel(x)  # shape (BLOCK_SIZE_N * BLOCK_SIZE_K,) with -1 for padding
+
+            # build comparison mask and respect valid values only
+            # eq: (len_x, BLOCK_CHUNK_R), valid: (len_x, 1)
+            eq = x[:, None] == bins_base[None, :]
+            valid = x[:, None] >= 0
+
+            # column mask to ignore columns beyond this_chunk_size (last chunk)
+            col_mask = (off_r_full[None, :] < this_chunk_size)  # (1, BLOCK_CHUNK_R)
+
+            mask = eq & valid & col_mask  # shape (len_x, BLOCK_CHUNK_R)
+            # sum across x dimension to get counts per bin in this chunk
+            hist = hist + tl.sum(mask, axis=0).to(tl.int32)
+
+        # optional: zero-out positions in hist beyond this_chunk_size (defensive)
+        hist = hist * (off_r_full < this_chunk_size).to(tl.int32)
+
+        # write hist back to global y for positions [chunk_start ... chunk_start+BLOCK_CHUNK_R)
+        y_ptrs = y_base + off_r_full * stride_yn + chunk_start * stride_yn
+        valid_store_mask = (chunk_start + off_r_full) < num_blocks
+        tl.store(y_ptrs, hist.to(y_ptr.dtype.element_ty), mask=valid_store_mask)
+
+        chunk_start += BLOCK_CHUNK_R """
 
 @triton.jit
 def count_kernel(
@@ -262,6 +341,7 @@ def count_kernel(
     off_k = tl.arange(0, BLOCK_SIZE_K)
     off_n = tl.arange(0, BLOCK_SIZE_N)
     x_ptr = x_ptr + pid_h * stride_xh + seq_start * stride_xn
+
     # x_ptrs = x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk
     # init y
     y = tl.zeros((BLOCK_SIZE_R,), dtype=tl.int32)
@@ -292,6 +372,56 @@ def count_kernel(
     tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=off_r < num_blocks)
 
 
+""" 
+    # iterate over R chunks (each chunk has size BLOCK_CHUNK_R, last chunk may be smaller)
+    # num_chunks = ceil(BLOCK_SIZE_R / BLOCK_CHUNK_R)
+    # chunk_start runs 0, BLOCK_CHUNK_R, 2*BLOCK_CHUNK_R, ...
+    chunk_start = 0
+    while chunk_start < BLOCK_SIZE_R:
+        # actual size for this chunk (may be less for last chunk)
+        this_chunk_size = min(BLOCK_CHUNK_R, BLOCK_SIZE_R - chunk_start)
+        # create local histogram for this chunk (small)
+        y = tl.zeros((this_chunk_size,), dtype=tl.int32)
+
+        # bins vector for this chunk: [chunk_start, chunk_start+1, ..., chunk_start+BLOCK_CHUNK_R-1]
+        bins = tl.arange(0, this_chunk_size) + chunk_start  
+
+        # loop over sequence entries in steps of BLOCK_SIZE_N
+        for i in range(0, seq_len, BLOCK_SIZE_N):
+            # load a block of topk indices: shape (BLOCK_SIZE_N, BLOCK_SIZE_K)
+            x = tl.load(
+                x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * stride_xn,
+                mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :],
+                other=-1,
+            )
+            x = tl.ravel(x)  # shape: (valid_len,) with -1 padding
+
+            # if there is no valid element (all -1), skip quickly
+            # Note: len_x may be constant (BLOCK_SIZE_N*BLOCK_SIZE_K), so we still loop but the comparisons handle -1.
+            # Build comparison mask: (x[:, None] == bins_base[None, :]) & (x[:, None] >= 0)
+            # result shape: (len_x, BLOCK_CHUNK_R)
+            equal_mask = x[:, None] == bins[None, :]
+            valid_mask = x[:, None] >= 0
+            count_mask =  tl.where(valid_mask, equal_mask, 0)  # bool matrix
+
+            # sum over x dimension -> counts per bin in this chunk (shape BLOCK_CHUNK_R)
+            # convert bool->int via .to(tl.int32) if needed
+            hist = tl.sum(count_mask, axis=0)
+            y += hist
+
+        # after processing all sequence blocks, write hist back to global y for this chunk
+        off_r = tl.arange(0, this_chunk_size)
+        y_ptr = y_ptr + pid_h * stride_yh + blocks_start * stride_yn
+        # compute global pointers for these bins
+        y_ptrs = y_ptr + (chunk_start + off_r) * stride_yn
+        # store only the valid portion (chunk_start + off_r < num_blocks)
+        valid_store_mask = (chunk_start + off_r) < num_blocks
+        # hist may have more elements than valid_store_mask; convert to y dtype and store
+        tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=valid_store_mask)
+
+        # next chunk
+        chunk_start += BLOCK_CHUNK_R """
+
 def count_query(
     topk_idx: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -302,9 +432,75 @@ def count_query(
     seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
     seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
     batch_size = seqlens.shape[0]
+    total_blocks = cu_seqblocks[-1].item()  # 总块数
+
     BLOCK_SIZE_K = triton.next_power_of_2(topk)
-    BLOCK_SIZE_N = triton.next_power_of_2(16 // BLOCK_SIZE_K)  # TODO: 256待调整
+    BLOCK_SIZE_N = triton.next_power_of_2(32 // BLOCK_SIZE_K)
+    BLOCK_CHUNK_SIZE_R = 256
+    BLOCK_SIZE_R = min(triton.next_power_of_2(seqblocks.max().item() + 2), BLOCK_CHUNK_SIZE_R)
+
+    active_query_count = torch.zeros(
+        num_kv_heads, total_blocks, dtype=torch.int32, device=topk_idx.device
+    )
+
+    num_chunks = (total_blocks + BLOCK_SIZE_R - 1) // BLOCK_SIZE_R 
+    print(f"count_query num_chunks {num_chunks},BLOCK_SIZE_R {BLOCK_SIZE_R},seqblocks {seqblocks},total_blocks {total_blocks},cu_seqblocks {cu_seqblocks}")
+    for chunk_id in range(num_chunks):
+        chunk_start = chunk_id * BLOCK_SIZE_R
+        chunk_end = min(chunk_start + BLOCK_SIZE_R, total_blocks)
+        chunk_size = chunk_end - chunk_start  
+
+        mask = (topk_idx >= chunk_start) & (topk_idx < chunk_end)
+        topk_idx_filtered = torch.where(mask, topk_idx - chunk_start, -1)
+
+        local_cu_seqblocks = []
+        for b in range(batch_size + 1):
+            global_block = cu_seqblocks[b].item()
+            local_block = max(0, min(global_block - chunk_start, chunk_size))
+            local_cu_seqblocks.append(local_block)
+        local_cu_seqblocks = torch.tensor(local_cu_seqblocks, dtype=torch.int32, device=topk_idx.device)
+
+        local_active = torch.zeros(
+            num_kv_heads, chunk_size, dtype=torch.int32, device=topk_idx.device
+        )
+        grid = (num_kv_heads, batch_size)
+        count_kernel[grid](
+            topk_idx_filtered,
+            local_active,  
+            cu_seqlens,
+            local_cu_seqblocks,  
+            topk,
+            topk_idx_filtered.stride(0),
+            topk_idx_filtered.stride(1),
+            topk_idx_filtered.stride(2),
+            local_active.stride(0),
+            local_active.stride(1),
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            BLOCK_SIZE_R=BLOCK_SIZE_R, 
+            num_warps=4,
+            num_stages=3,
+        )
+        active_query_count[:, chunk_start:chunk_end] = local_active[:, :chunk_size]
+
+    return active_query_count
+
+""" def count_query(
+    topk_idx: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqblocks: torch.Tensor,
+    block_size: int,
+):
+    num_kv_heads, total_len, topk = topk_idx.shape
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    seqblocks = cu_seqblocks[1:] - cu_seqblocks[:-1]
+    batch_size = seqlens.shape[0]
+    BLOCK_SIZE_K = triton.next_power_of_2(topk)
+    BLOCK_SIZE_N = triton.next_power_of_2(64 // BLOCK_SIZE_K)  # TODO: 256待调整
     BLOCK_SIZE_R = triton.next_power_of_2(seqblocks.max().item() + 2)
+    BLOCK_CHUNK_R = 256 if BLOCK_SIZE_R >= 256 else BLOCK_SIZE_R
+    print(f"count_query: BLOCK_SIZE_K {BLOCK_SIZE_K},BLOCK_SIZE_N {BLOCK_SIZE_N},BLOCK_SIZE_R {BLOCK_SIZE_R}")
+    print(f"count_query: batch_size {batch_size},seqlens {seqlens}, cu_seqblocks {cu_seqblocks},seqblocks {seqblocks}")
     active_query_count = torch.zeros(
         num_kv_heads, cu_seqblocks[-1], dtype=torch.int32, device=topk_idx.device
     )
@@ -323,10 +519,11 @@ def count_query(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         BLOCK_SIZE_R=BLOCK_SIZE_R,
+        BLOCK_CHUNK_R=BLOCK_CHUNK_R,
         num_warps=4,
         num_stages=3,
     )
-    return active_query_count
+    return active_query_count """
 
 
 @triton.jit
@@ -900,9 +1097,8 @@ def _topk_sparse_attention_fwd(
     # 计算总q块数量和总grid尺寸
     q_blocks = triton.cdiv(max_seqlen_q, num_q_loop)
     total_grid_size = batch_size * num_k_heads * q_blocks
-    MAX_GRID_DIM = 65535  # 最大grid尺寸限制
 
-    if total_grid_size <= MAX_GRID_DIM:
+    if total_grid_size <= utils.MAX_GRID_DIM:
         # 无需切割，直接运行完整grid
         grid = (batch_size, num_k_heads, q_blocks)
         forward_kernel[grid](
@@ -925,9 +1121,10 @@ def _topk_sparse_attention_fwd(
             num_stages=num_stages,
         )
     else:
+        print(f"topk forward_kernel enter split block")
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = batch_size * num_k_heads * curr_q_blocks <= 65535
-        max_curr_q_blocks = MAX_GRID_DIM // (batch_size * num_k_heads)
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (batch_size * num_k_heads)
         if max_curr_q_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,batch_size={batch_size}, num_k_heads={num_k_heads}"
@@ -1050,9 +1247,8 @@ def _topk_sparse_attention_bwd(
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_Q, IS_HOPPER_GPU)
     k_blocks=triton.cdiv(max_seqlen_k, BLOCK_SIZE_K)
-    MAX_GRID_DIM = 65535
     total_grid_size = batch_size * num_q_heads * k_blocks    
-    if total_grid_size <= MAX_GRID_DIM:
+    if total_grid_size <= utils.MAX_GRID_DIM:
         grid = (batch_size, num_q_heads, k_blocks)
         print(f"topk backward_dkdv total_grid_size {total_grid_size},k_blocks {k_blocks}")
         backward_dkdv[grid](
@@ -1110,7 +1306,8 @@ def _topk_sparse_attention_bwd(
             num_stages=num_stages,
         )
     else:
-        max_curr_k_blocks = MAX_GRID_DIM // (num_k_heads * batch_size)
+        print(f"topk backward_dkdv enter split block")
+        max_curr_k_blocks = utils.MAX_GRID_DIM // (num_k_heads * batch_size)
         if max_curr_k_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, k_blocks={k_blocks}"
@@ -1121,7 +1318,7 @@ def _topk_sparse_attention_bwd(
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_k_blocks = min(max_curr_k_blocks, k_blocks - k_block_start)
             # 当前批次的grid尺寸
-            grid = (num_k_heads * batch_size, curr_k_blocks)
+            grid = (batch_size,num_q_heads,curr_k_blocks)
             print(f"max_curr_q_blocks {max_curr_k_blocks},q_block_start {k_block_start},q_blocks {k_blocks}")
             # 启动kernel处理当前批次
             backward_dkdv[grid](
@@ -1194,7 +1391,7 @@ def _topk_sparse_attention_bwd(
 
     q_blocks=triton.cdiv(max_seqlen_q, num_q_loop)
     total_grid_size = batch_size * num_q_heads * q_blocks
-    if total_grid_size <= MAX_GRID_DIM:
+    if total_grid_size <= utils.MAX_GRID_DIM:
         grid = (batch_size, num_k_heads, q_blocks)
         backward_dq[grid](
             q,
@@ -1244,7 +1441,8 @@ def _topk_sparse_attention_bwd(
             num_stages=num_stages,
         )
     else:
-        max_curr_q_blocks = MAX_GRID_DIM // (num_k_heads * batch_size)
+        print(f"topk backward_dq enter split block")
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (num_k_heads * batch_size)
         if max_curr_q_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, q_blocks={q_blocks}"
@@ -1300,8 +1498,9 @@ def _topk_sparse_attention_bwd(
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             BLOCK_SIZE_H=BLOCK_SIZE_H,
             BLOCK_SIZE_T=BLOCK_SIZE_T,
-            num_warps=num_warps,
-            num_stages=num_stages, )
+            #num_warps=num_warps,
+            #num_stages=num_stages, 
+            )
        
     return dq, dk, dv
 

@@ -18,6 +18,7 @@ import torch
 import triton
 import triton.language as tl
 import warnings
+from native_sparse_attention.ops.triton import utils
 from native_sparse_attention.ops.triton.utils import get_num_warps_stages, is_hopper_gpu
 
 
@@ -164,7 +165,9 @@ def forward_kernel(
     Q = q_start_in_seq + tl.arange(0, BLOCK_SIZE_Q)[:, None]
     D = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask = (Q < q_len) & (D < HEAD_DIM)
-    ptr = o_ptr + q_start * stride_on + pid_h * stride_oh + Q * stride_on + D * stride_od
+    ptr = (
+        o_ptr + q_start * stride_on + pid_h * stride_oh + Q * stride_on + D * stride_od
+    )
     tl.store(ptr, acc_o.to(o_ptr.dtype.element_ty), mask=mask)
 
     # 保存lse
@@ -188,10 +191,11 @@ def backward_sum_o_do(
     stride_dod,
     stride_dh,
     stride_dn,
+    o_block_offset: tl.constexpr,
     BLOCK_SIZE_O: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
-    pid_n = tl.program_id(0)
+    pid_n = tl.program_id(0) + o_block_offset
     pid_h = tl.program_id(1)
     off_n = pid_n * BLOCK_SIZE_O + tl.arange(0, BLOCK_SIZE_O)
     off_d = tl.arange(0, BLOCK_SIZE_D)
@@ -302,8 +306,15 @@ def backward_dkdv(
     Q = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[:, None]
     D = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask = (Q < k_len) & (D < HEAD_DIM)
-    ptr = dk_ptr + k_start * stride_dkn + pid_kh * stride_dkh + pid_sh * stride_dks + Q * stride_dkn + D * stride_dkd    
-    
+    ptr = (
+        dk_ptr
+        + k_start * stride_dkn
+        + pid_kh * stride_dkh
+        + pid_sh * stride_dks
+        + Q * stride_dkn
+        + D * stride_dkd
+    )
+
     v_ptrs = tl.make_block_ptr(
         base=v_ptr + k_start * stride_vn + pid_kh * stride_vh,
         shape=(k_len, HEAD_DIM),
@@ -323,7 +334,14 @@ def backward_dkdv(
     Q1 = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[:, None]
     D1 = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask1 = (Q1 < k_len) & (D1 < HEAD_DIM)
-    ptr1 = dv_ptr + k_start * stride_dvn + pid_kh * stride_dvh + pid_sh * stride_dvs + Q1 * stride_dvn + D1 * stride_dvd    
+    ptr1 = (
+        dv_ptr
+        + k_start * stride_dvn
+        + pid_kh * stride_dvh
+        + pid_sh * stride_dvs
+        + Q1 * stride_dvn
+        + D1 * stride_dvd
+    )
 
     # offsets
     off_q = tl.arange(0, BLOCK_SIZE_Q)
@@ -389,8 +407,8 @@ def backward_dkdv(
         do = tl.load(do_ptrs, boundary_check=(0, 1), padding_option="zero")
         # lse = tl.load(lse_ptrs, boundary_check=(0, 1), padding_option="zero")
         # d = tl.load(d_ptrs, boundary_check=(0, 1), padding_option="zero")
-        lse = tl.load(lse_ptrs, boundary_check=(0,), padding_option="zero")[None,:]
-        d = tl.load(d_ptrs, boundary_check=(0,), padding_option="zero")[None,:]
+        lse = tl.load(lse_ptrs, boundary_check=(0,), padding_option="zero")[None, :]
+        d = tl.load(d_ptrs, boundary_check=(0,), padding_option="zero")[None, :]
         # compute qk
         # [BLOCK_SIZE_K, HEAD_DIM] @ [HEAD_DIM, BLOCK_SIE_Q] -> [BLOCK_SIZE_K, BLOCK_SIE_Q]
         qk = tl.where(off_k[:, None] <= (off_q + i)[None, :], float(0.0), float("-inf"))
@@ -462,6 +480,7 @@ def backward_dq(
     stride_dqn,
     stride_dqh,
     stride_dqd,
+    q_block_offset: tl.constexpr,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -471,7 +490,7 @@ def backward_dq(
     # get batch id and head id
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
-    pid_q = tl.program_id(2)
+    pid_q = tl.program_id(2) + q_block_offset
     pid_kh = pid_h // NUM_SHARE_Q_HEADS
     # get q k start and len after rmpad
     q_start = tl.load(cu_seqlens_q + pid_b)
@@ -502,7 +521,13 @@ def backward_dq(
     Q1 = q_start_in_seq + tl.arange(0, BLOCK_SIZE_Q)[:, None]
     D1 = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask1 = (Q1 < q_len) & (D1 < HEAD_DIM)
-    ptr1 = dq_ptr + q_start * stride_dqn + pid_h * stride_dqh + Q1 * stride_dqn + D1 * stride_dqd    
+    ptr1 = (
+        dq_ptr
+        + q_start * stride_dqn
+        + pid_h * stride_dqh
+        + Q1 * stride_dqn
+        + D1 * stride_dqd
+    )
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
         shape=(k_len, HEAD_DIM),
@@ -622,21 +647,38 @@ def _compressed_attention_fwd(
     # 计算总q块数量和单次最大允许的q块数量
     num_q_blocks = triton.cdiv(max_seqlen_q, BLOCK_SIZE_Q)  # 总q块数
     total_grid_size = batch_size * num_q_heads * num_q_blocks  # 总grid尺寸
-    MAX_GRID_DIM = 65535  # 最大grid尺寸限制
 
-    if total_grid_size <= MAX_GRID_DIM:
+    if total_grid_size <= utils.MAX_GRID_DIM:
         # 无需切割，单次启动kernel
         grid = (batch_size, num_q_heads, num_q_blocks)
         forward_kernel[grid](
-            q, k, v, o, lse,
-            kernel_size, kernel_stride,
-            cu_seqlens_q, cu_seqlens_k,
-            num_k_heads, num_share_q_heads, head_dim, sm_scale,
-            q.stride(0), q.stride(1), q.stride(2),
-            k.stride(0), k.stride(1), k.stride(2),
-            v.stride(0), v.stride(1), v.stride(2),
-            o.stride(0), o.stride(1), o.stride(2),
-            lse.stride(0), lse.stride(1),
+            q,
+            k,
+            v,
+            o,
+            lse,
+            kernel_size,
+            kernel_stride,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            num_k_heads,
+            num_share_q_heads,
+            head_dim,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            lse.stride(0),
+            lse.stride(1),
             q_block_start=0,  # 起始q块偏移为0
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -646,9 +688,11 @@ def _compressed_attention_fwd(
         )
     else:
         # 计算单次最大可处理的q块数量（确保batch_size * num_q_heads * curr_blocks <= 65536）
-        MAX_GRID_Q_BLOCKS_PER_LAUNCH = MAX_GRID_DIM // (batch_size * num_q_heads)
+        MAX_GRID_Q_BLOCKS_PER_LAUNCH = utils.MAX_GRID_DIM // (batch_size * num_q_heads)
         if MAX_GRID_Q_BLOCKS_PER_LAUNCH <= 0:
-            raise ValueError(f"batch_size ({batch_size}) 和 num_q_heads ({num_q_heads}) 过大，无法满足grid限制")
+            raise ValueError(
+                f"batch_size ({batch_size}) 和 num_q_heads ({num_q_heads}) 过大，无法满足grid限制"
+            )
 
         # 按q块分批次处理
         for start_block in range(0, num_q_blocks, MAX_GRID_Q_BLOCKS_PER_LAUNCH):
@@ -658,15 +702,33 @@ def _compressed_attention_fwd(
 
             # 启动kernel处理当前批次的q块
             forward_kernel[grid](
-                q, k, v, o, lse,
-                kernel_size, kernel_stride,
-                cu_seqlens_q, cu_seqlens_k,
-                num_k_heads, num_share_q_heads, head_dim, sm_scale,
-                q.stride(0), q.stride(1), q.stride(2),
-                k.stride(0), k.stride(1), k.stride(2),
-                v.stride(0), v.stride(1), v.stride(2),
-                o.stride(0), o.stride(1), o.stride(2),
-                lse.stride(0), lse.stride(1),
+                q,
+                k,
+                v,
+                o,
+                lse,
+                kernel_size,
+                kernel_stride,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                num_k_heads,
+                num_share_q_heads,
+                head_dim,
+                sm_scale,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                lse.stride(0),
+                lse.stride(1),
                 q_block_start=start_block,  # 传递当前批次的起始q块偏移
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -676,6 +738,7 @@ def _compressed_attention_fwd(
             )
 
     return o, lse
+
 
 def _compressed_attention_bwd(
     o: torch.Tensor,
@@ -698,30 +761,67 @@ def _compressed_attention_bwd(
     o_len, num_o_heads, head_dim = o.shape
     num_share_q_heads = num_q_heads // num_k_heads
     # compute D
+    print(f"o.shape is {o.shape}")
     delta = torch.zeros([num_o_heads, o_len], device=o.device, dtype=torch.float32)
-    grid = lambda META: (triton.cdiv(o_len, META["BLOCK_SIZE_O"]), num_o_heads)
     BLOCK_SIZE_O = 128
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_O, IS_HOPPER_GPU)
-    backward_sum_o_do[grid](
-        o,
-        do,
-        delta,
-        o_len,
-        head_dim,
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
-        do.stride(0),
-        do.stride(1),
-        do.stride(2),
-        delta.stride(0),
-        delta.stride(1),
-        BLOCK_SIZE_O=BLOCK_SIZE_O,
-        BLOCK_SIZE_D=BLOCK_SIZE_D,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    o_blocks = triton.cdiv(o_len, BLOCK_SIZE_O)
+    total_grid_size = num_o_heads * o_blocks
+    if total_grid_size <= utils.MAX_GRID_DIM:
+        grid = lambda META: (o_blocks, num_o_heads)
+        backward_sum_o_do[grid](
+            o,
+            do,
+            delta,
+            o_len,
+            head_dim,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            o_block_offset=0,
+            BLOCK_SIZE_O=BLOCK_SIZE_O,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        # 计算单次最大可处理的q块数量（确保不超过grid限制）
+        # 单次grid尺寸 = batch_size * num_k_heads * curr_q_blocks <= 65535
+        max_curr_o_blocks = utils.MAX_GRID_DIM // num_o_heads
+
+        # 按q块分批次处理（切割max_seqlen_q）
+        for o_block_start in range(0, o_blocks, max_curr_o_blocks):
+            # 当前批次处理的q块数量（最后一批可能不足）
+            curr_o_blocks = min(max_curr_o_blocks, o_blocks - o_block_start)
+            # 当前批次的grid尺寸
+            grid = (num_o_heads, curr_o_blocks)
+            backward_sum_o_do[grid](
+                o,
+                do,
+                delta,
+                o_len,
+                head_dim,
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                do.stride(0),
+                do.stride(1),
+                do.stride(2),
+                delta.stride(0),
+                delta.stride(1),
+                o_block_offset=o_block_start,
+                BLOCK_SIZE_O=BLOCK_SIZE_O,
+                BLOCK_SIZE_D=BLOCK_SIZE_D,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+
     # compute dk dv
     dk = torch.zeros(
         num_share_q_heads, k_len, num_k_heads, head_dim, device=k.device, dtype=k.dtype
@@ -791,55 +891,107 @@ def _compressed_attention_bwd(
     dv = dv.sum(0)
     # compute dq
     dq = torch.zeros_like(q)
-    grid = lambda META: (
-        batch_size,
-        num_q_heads,
-        triton.cdiv(max_seqlen_q, META["BLOCK_SIZE_Q"]),
-    )
     BLOCK_SIZE_Q = 32
     BLOCK_SIZE_K = 32
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_Q, IS_HOPPER_GPU)
-    backward_dq[grid](
-        q,
-        k,
-        v,
-        lse,
-        delta,
-        do,
-        dq,
-        kernel_size,
-        kernel_stride,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        num_k_heads,
-        num_share_q_heads,
-        head_dim,
-        sm_scale,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        lse.stride(0),
-        lse.stride(1),
-        delta.stride(0),
-        delta.stride(1),
-        do.stride(0),
-        do.stride(1),
-        do.stride(2),
-        dq.stride(0),
-        dq.stride(1),
-        dq.stride(2),
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        BLOCK_SIZE_D=BLOCK_SIZE_D,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+
+    q_blocks = triton.cdiv(max_seqlen_q, BLOCK_SIZE_Q)
+    total_grid_size = batch_size * num_q_heads * q_blocks
+    if total_grid_size <= utils.MAX_GRID_DIM:
+        grid = lambda META: (batch_size, num_q_heads, q_blocks)
+        backward_dq[grid](
+            q,
+            k,
+            v,
+            lse,
+            delta,
+            do,
+            dq,
+            kernel_size,
+            kernel_stride,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            num_k_heads,
+            num_share_q_heads,
+            head_dim,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            lse.stride(0),
+            lse.stride(1),
+            delta.stride(0),
+            delta.stride(1),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            dq.stride(0),
+            dq.stride(1),
+            dq.stride(2),
+            q_block_offset=0,
+            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (batch_size * num_q_heads)
+        # 按q块分批次处理（切割max_seqlen_q）
+        for q_block_start in range(0, q_blocks, max_curr_q_blocks):
+            # 当前批次处理的q块数量（最后一批可能不足）
+            curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
+            # 当前批次的grid尺寸
+            grid = (batch_size, num_k_heads, curr_q_blocks)
+            backward_dq[grid](
+                q,
+                k,
+                v,
+                lse,
+                delta,
+                do,
+                dq,
+                kernel_size,
+                kernel_stride,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                num_k_heads,
+                num_share_q_heads,
+                head_dim,
+                sm_scale,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                lse.stride(0),
+                lse.stride(1),
+                delta.stride(0),
+                delta.stride(1),
+                do.stride(0),
+                do.stride(1),
+                do.stride(2),
+                dq.stride(0),
+                dq.stride(1),
+                dq.stride(2),
+                q_block_offset=q_block_start, 
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_D=BLOCK_SIZE_D,
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+
     return dq, dk, dv
 
 
@@ -956,17 +1108,17 @@ def score_kernel(
     pid_q_local = tl.program_id(1)
     pid_q = pid_q_local + q_block_offset  # 全局q块ID
     pid_k = tl.program_id(2)
-    
+
     # get q k start and len after rmpad
     q_start = tl.load(cu_seqlens_q + pid_b)
     q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
     k_start = tl.load(cu_seqlens_k + pid_b)
     k_len = tl.load(cu_seqlens_k + pid_b + 1) - k_start
-    
+
     # 跳过超出实际序列长度的块
     if pid_q * BLOCK_SIZE_Q >= q_len or pid_k * BLOCK_SIZE_K >= k_len:
         return
-    
+
     # init k pointer and load k
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -977,15 +1129,15 @@ def score_kernel(
         order=(0, 1),
     )
     k = tl.load(k_ptrs, boundary_check=(0, 1), padding_option="zero")
-    
+
     # offsets：基于全局q块ID计算实际序列索引
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q
     off_k = tl.arange(0, BLOCK_SIZE_K) + pid_k * BLOCK_SIZE_K
     causal_mask = off_q[:, None] >= (off_k * kernel_stride + kernel_size - 1)[None, :]
-    
+
     # init score
     s = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_K), dtype=tl.float32)
-    
+
     # loop over gqa heads
     for h in range(NUM_SHARE_Q_HEADS):
         pid_h = pid_kh * NUM_SHARE_Q_HEADS + h
@@ -1013,12 +1165,14 @@ def score_kernel(
         qk += tl.dot(q, k) * qk_scale
         # compute score
         s += tl.where(causal_mask, tl.exp2(qk - lse), 0)
-    
+
     # save output
     Q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)[:, None]
     D = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)[None, :]
     mask = (Q < q_len) & (D < k_len)
-    ptr = s_ptr + pid_kh * stride_sh + q_start * stride_sq + Q * stride_sq + D * stride_sk
+    ptr = (
+        s_ptr + pid_kh * stride_sh + q_start * stride_sq + Q * stride_sq + D * stride_sk
+    )
     tl.store(ptr, s.to(s_ptr.dtype.element_ty), mask=mask)
 
 
@@ -1053,7 +1207,7 @@ def _get_attention_score(
     score = torch.zeros(
         num_k_heads, q_len, max_seqlen_k, dtype=torch.float32, device=q.device
     )
-    
+
     # 配置参数
     BLOCK_SIZE_Q = 64
     BLOCK_SIZE_K = 64
@@ -1063,20 +1217,33 @@ def _get_attention_score(
     k_blocks = triton.cdiv(max_seqlen_k, BLOCK_SIZE_K)
     # 计算总grid尺寸
     total_grid_size = batch_size * num_k_heads * q_blocks * k_blocks
-    MAX_GRID_DIM = 65535  # 最大grid尺寸限制
-
-    if total_grid_size <= MAX_GRID_DIM:
+    if total_grid_size <= utils.MAX_GRID_DIM:
         # 无需切割，直接运行
         grid = (batch_size * num_k_heads, q_blocks, k_blocks)
         score_kernel[grid](
-            q, k, lse, score,
-            kernel_size, kernel_stride,
-            cu_seqlens_q, cu_seqlens_k,
-            num_k_heads, num_share_q_heads, head_dim, sm_scale,
-            q.stride(0), q.stride(1), q.stride(2),
-            k.stride(0), k.stride(1), k.stride(2),
-            lse.stride(0), lse.stride(1),
-            score.stride(0), score.stride(1), score.stride(2),
+            q,
+            k,
+            lse,
+            score,
+            kernel_size,
+            kernel_stride,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            num_k_heads,
+            num_share_q_heads,
+            head_dim,
+            sm_scale,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            lse.stride(0),
+            lse.stride(1),
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
             q_block_offset=0,  # 起始q块偏移为0
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -1087,29 +1254,44 @@ def _get_attention_score(
     else:
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = batch_size * num_k_heads * curr_q_blocks * k_blocks <= 65535
-        max_curr_q_blocks = MAX_GRID_DIM // (batch_size * num_k_heads * k_blocks)
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (batch_size * num_k_heads * k_blocks)
         if max_curr_q_blocks <= 0:
             raise ValueError(
-                f"无法满足grid限制，batch_size={batch_size}, num_k_heads={num_k_heads}, k_blocks={k_blocks}"
+                f"无法满足grid限制,batch_size={batch_size}, num_k_heads={num_k_heads}, k_blocks={k_blocks}"
             )
-        
+
         # 按q块分批次处理（切割max_seqlen_q）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
             # 当前批次的grid尺寸
             grid = (batch_size * num_k_heads, curr_q_blocks, k_blocks)
-            
+
             # 启动kernel处理当前批次
             score_kernel[grid](
-                q, k, lse, score,
-                kernel_size, kernel_stride,
-                cu_seqlens_q, cu_seqlens_k,
-                num_k_heads, num_share_q_heads, head_dim, sm_scale,
-                q.stride(0), q.stride(1), q.stride(2),
-                k.stride(0), k.stride(1), k.stride(2),
-                lse.stride(0), lse.stride(1),
-                score.stride(0), score.stride(1), score.stride(2),
+                q,
+                k,
+                lse,
+                score,
+                kernel_size,
+                kernel_stride,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                num_k_heads,
+                num_share_q_heads,
+                head_dim,
+                sm_scale,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                lse.stride(0),
+                lse.stride(1),
+                score.stride(0),
+                score.stride(1),
+                score.stride(2),
                 q_block_offset=q_block_start,  # 传递当前批次的q块起始偏移
                 BLOCK_SIZE_Q=BLOCK_SIZE_Q,
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -1119,6 +1301,7 @@ def _get_attention_score(
             )
 
     return score
+
 
 @triton.jit
 def _transform_score_kernel(
@@ -1259,10 +1442,13 @@ def transform_score(
     k_blocks = triton.cdiv(max_blocks, BLOCK_SIZE_K)
     # 计算总grid尺寸
     total_grid_size = num_k_heads * batch_size * q_blocks * k_blocks
-    MAX_GRID_DIM = 65535  # 最大grid尺寸限制
-    
-    if total_grid_size <= MAX_GRID_DIM:
-        print(f"num_k_heads {num_k_heads},batch_size {batch_size},q_blocks {q_blocks},k_blocks {k_blocks}")
+    if total_grid_size <= utils.MAX_GRID_DIM:
+        print(
+            f"transform_score: num_k_heads {num_k_heads},batch_size {batch_size},q_blocks {q_blocks},k_blocks {k_blocks}"
+        )
+        print(
+            f"transform_score: score {score},score shape {score.shape},cu_seqlens_q {cu_seqlens_q},cu_seqlens_q shape  {cu_seqlens_q.shape},num_offs {num_offs}"
+        )
         # 无需切割，直接运行完整grid
         grid = (num_k_heads * batch_size, q_blocks, k_blocks)
         _transform_score_kernel[grid](
@@ -1293,21 +1479,25 @@ def transform_score(
             num_stages=3,
         )
     else:
+        print(f"enter transform_score split grid")
+        
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = num_k_heads * batch_size * curr_q_blocks * k_blocks <= 65535
-        max_curr_q_blocks = MAX_GRID_DIM // (num_k_heads * batch_size * k_blocks)
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (num_k_heads * batch_size * k_blocks)
         if max_curr_q_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, k_blocks={k_blocks}"
             )
-        
+
         # 按q块分批次处理（切割total_query_len）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
             # 当前批次的grid尺寸
             grid = (num_k_heads * batch_size, curr_q_blocks, k_blocks)
-            print(f"max_curr_q_blocks {max_curr_q_blocks},q_block_start {q_block_start},q_blocks {q_blocks}")
+            print(
+                f"max_curr_q_blocks {max_curr_q_blocks},q_block_start {q_block_start},q_blocks {q_blocks}"
+            )
             # 启动kernel处理当前批次
             _transform_score_kernel[grid](
                 score,

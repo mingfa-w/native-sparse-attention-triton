@@ -13,7 +13,7 @@
 # limitations under the License.
 import torch
 
-MAX_GRID_BLOCKS_PER_LAUNCH = 65535
+MAX_GRID_DIM = 65535
 
 def is_hopper_gpu():
     if torch.cuda.is_available():

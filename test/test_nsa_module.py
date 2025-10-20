@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([21000]).int().npu()
+    seqlens = torch.LongTensor([22000]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -65,9 +65,9 @@ if __name__ == "__main__":
         dim=0,
     ).to(torch.int32)
     print(f"cu_seqlens {cu_seqlens}")
-    x = torch.zeros(cu_seqlens[-1], 8192, device="npu", dtype=torch.bfloat16).uniform_(
+    x = torch.zeros(cu_seqlens[-1], 8192, device="cpu", dtype=torch.bfloat16).uniform_(
         -1, 1
-    )
+    ).npu()
 
     # forward test
     print("======= NSA Forward & Backward Test =======\n")

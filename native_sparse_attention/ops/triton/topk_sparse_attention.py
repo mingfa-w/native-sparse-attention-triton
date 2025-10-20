@@ -1307,7 +1307,7 @@ def _topk_sparse_attention_bwd(
         )
     else:
         print(f"topk backward_dkdv enter split block")
-        max_curr_k_blocks = utils.MAX_GRID_DIM // (num_k_heads * batch_size)
+        max_curr_k_blocks = utils.MAX_GRID_DIM // (num_q_heads * batch_size)
         if max_curr_k_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, k_blocks={k_blocks}"
@@ -1319,7 +1319,7 @@ def _topk_sparse_attention_bwd(
             curr_k_blocks = min(max_curr_k_blocks, k_blocks - k_block_start)
             # 当前批次的grid尺寸
             grid = (batch_size,num_q_heads,curr_k_blocks)
-            print(f"max_curr_q_blocks {max_curr_k_blocks},q_block_start {k_block_start},q_blocks {k_blocks}")
+            print(f"max_curr_q_blocks {max_curr_k_blocks},k_block_start {k_block_start},k_blocks {k_blocks}")
             # 启动kernel处理当前批次
             backward_dkdv[grid](
             q,

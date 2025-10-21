@@ -207,10 +207,11 @@ def backward_sum_o_do(
     stride_dod,
     stride_dh,
     stride_dn,
+    o_block_offset: tl.constexpr,
     BLOCK_SIZE_O: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
-    pid_n = tl.program_id(0)
+    pid_n = tl.program_id(0) + o_block_offset
     pid_h = tl.program_id(1)
     off_o = pid_n * BLOCK_SIZE_O + tl.arange(0, BLOCK_SIZE_O)
     off_d = tl.arange(0, BLOCK_SIZE_D)
@@ -370,6 +371,7 @@ def count_kernel(
     y_ptr = y_ptr + pid_h * stride_yh + blocks_start * stride_yn
     y_ptrs = y_ptr + off_r * stride_yn
     tl.store(y_ptrs, y.to(y_ptr.dtype.element_ty), mask=off_r < num_blocks)
+
 
 
 """ 
@@ -1189,26 +1191,59 @@ def _topk_sparse_attention_bwd(
     BLOCK_SIZE_O = 128
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_O, IS_HOPPER_GPU)
-    grid = (triton.cdiv(o_len, BLOCK_SIZE_O), num_o_heads)
-    backward_sum_o_do[grid](
-        o,
-        do,
-        delta,
-        o_len,
-        head_dim,
-        o.stride(0),
-        o.stride(1),
-        o.stride(2),
-        do.stride(0),
-        do.stride(1),
-        do.stride(2),
-        delta.stride(0),
-        delta.stride(1),
-        BLOCK_SIZE_O=BLOCK_SIZE_O,
-        BLOCK_SIZE_D=BLOCK_SIZE_D,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    o_blocks = triton.cdiv(o_len, BLOCK_SIZE_O)
+    total_grid_size = num_o_heads * o_blocks
+    if total_grid_size <= utils.MAX_GRID_DIM:
+        grid = (o_blocks, num_o_heads)
+        backward_sum_o_do[grid](
+            o,
+            do,
+            delta,
+            o_len,
+            head_dim,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            o_block_offset=0,
+            BLOCK_SIZE_O=BLOCK_SIZE_O,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        max_curr_o_blocks = utils.MAX_GRID_DIM // num_o_heads
+
+        # 按q块分批次处理（切割max_seqlen_q）
+        for o_block_start in range(0, o_blocks, max_curr_o_blocks):
+            # 当前批次处理的q块数量（最后一批可能不足）
+            curr_o_blocks = min(max_curr_o_blocks, o_blocks - o_block_start)
+            # 当前批次的grid尺寸
+            grid = (curr_o_blocks,num_o_heads)
+            backward_sum_o_do[grid](
+            o,
+            do,
+            delta,
+            o_len,
+            head_dim,
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            do.stride(0),
+            do.stride(1),
+            do.stride(2),
+            delta.stride(0),
+            delta.stride(1),
+            o_block_offset=o_block_start,
+            BLOCK_SIZE_O=BLOCK_SIZE_O,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_warps=num_warps,
+            num_stages=num_stages, )
+
     # count active querys for each key block, shape: (num_k_heads, total_k_blocks)
     seqlens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     seqblocks = torch.ceil(seqlens / block_size).to(torch.int32)

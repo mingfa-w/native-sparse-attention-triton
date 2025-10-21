@@ -1357,6 +1357,7 @@ def _transform_score_kernel(
     # load score：基于全局q块ID计算实际序列索引
     off_q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)  # 全局q索引
     off_k = (k_start + tl.arange(0, BLOCK_SIZE_K)) * block_stride - pad_len
+    off_k= tl.maximum(0, off_k)
     off_k = off_k[None, :] + off_o[:, None]
 
     s_ptrs = (
@@ -1480,6 +1481,13 @@ def transform_score(
         )
     else:
         print(f"enter transform_score split grid")
+        print(f"BLOCK_SIZE_Q {BLOCK_SIZE_Q},BLOCK_SIZE_K {BLOCK_SIZE_K} triton.next_power_of_2(max_blocks) {triton.next_power_of_2(max_blocks)},BLOCK_SIZE_O {BLOCK_SIZE_O}")
+        print(
+            f"transform_score split grid: num_k_heads {num_k_heads},batch_size {batch_size},q_blocks {q_blocks},k_blocks {k_blocks}"
+        )
+        print(
+            f"transform_score split grid: score {score},score shape {score.shape},cu_seqlens_q {cu_seqlens_q},cu_seqlens_q shape  {cu_seqlens_q.shape},num_offs {num_offs}"
+        )
         
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = num_k_heads * batch_size * curr_q_blocks * k_blocks <= 65535
@@ -1488,9 +1496,9 @@ def transform_score(
             raise ValueError(
                 f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, k_blocks={k_blocks}"
             )
-
         # 按q块分批次处理（切割total_query_len）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
+            print(f"q_block_start {q_block_start}")
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
             # 当前批次的grid尺寸

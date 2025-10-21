@@ -25,9 +25,9 @@ if __name__ == "__main__":
         NativeSparseAttention(
             compress_type="avgpool",
             hidden_size=8192,
-            num_q_heads=64,
-            num_kv_heads=4,
-            head_dim=64,
+            num_q_heads=5,
+            num_kv_heads=5,
+            head_dim=128,
             kernel_size=32,
             kernel_stride=16,
             block_size=64,
@@ -37,7 +37,7 @@ if __name__ == "__main__":
             window_size=512,
             rope_config=RopeConfig(
                 max_position_embeddings=131072,
-                head_dim=64,
+                head_dim=128,
                 rope_theta=500000,
                 rope_scaling={
                     "factor": 8.0,
@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([22000]).int().npu()
+    seqlens = torch.LongTensor([102400]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),

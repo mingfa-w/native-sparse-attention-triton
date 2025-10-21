@@ -243,7 +243,7 @@ if __name__ == "__main__":
             )
         return ms, min_ms, max_ms
 
-    benchmark.run(show_plots=True, print_data=True)
+    #benchmark.run(show_plots=True, print_data=True)
 
     """    
     # benchmark

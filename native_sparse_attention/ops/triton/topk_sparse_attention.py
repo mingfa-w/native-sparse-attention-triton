@@ -1278,7 +1278,7 @@ def _topk_sparse_attention_bwd(
     )
     batch_size = cu_seqlens_q.shape[0] - 1
     BLOCK_SIZE_K = triton.next_power_of_2(block_size)
-    BLOCK_SIZE_Q = 64
+    BLOCK_SIZE_Q = 32
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
     num_warps, num_stages = get_num_warps_stages(head_dim, BLOCK_SIZE_Q, IS_HOPPER_GPU)
     k_blocks=triton.cdiv(max_seqlen_k, BLOCK_SIZE_K)
@@ -1536,7 +1536,7 @@ def _topk_sparse_attention_bwd(
             #num_warps=num_warps,
             #num_stages=num_stages, 
             )
-       
+
     return dq, dk, dv
 
 

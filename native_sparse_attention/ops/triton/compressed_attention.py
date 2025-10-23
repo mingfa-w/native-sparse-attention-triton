@@ -18,6 +18,7 @@ import torch
 import triton
 import triton.language as tl
 import warnings
+from native_sparse_attention.ops.triton import utils
 from native_sparse_attention.ops.triton.utils import get_num_warps_stages, is_hopper_gpu
 
 
@@ -1050,6 +1051,7 @@ def _transform_score_kernel(
     stride_bsh,
     stride_bsq,
     stride_bsk,
+    q_block_offset: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_O: tl.constexpr,
@@ -1057,7 +1059,8 @@ def _transform_score_kernel(
     pid_bh = tl.program_id(0)
     pid_b = pid_bh // num_heads
     pid_h = pid_bh % num_heads
-    pid_q = tl.program_id(1)
+    pid_q_local = tl.program_id(1)
+    pid_q = pid_q_local + q_block_offset
     pid_k = tl.program_id(2)
     q_start = tl.load(cu_seqlens_q + pid_b)
     q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
@@ -1070,6 +1073,7 @@ def _transform_score_kernel(
     # load score
     off_q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
     off_k = (k_start + tl.arange(0, BLOCK_SIZE_K)) * block_stride - pad_len
+    #off_k= tl.maximum(0, off_k)
     off_k = off_k[None, :] + off_o[:, None]
     s_ptrs = (
         s_ptr
@@ -1145,39 +1149,104 @@ def transform_score(
     BLOCK_SIZE_K = min(128, triton.next_power_of_2(max_blocks))
     BLOCK_SIZE_O = triton.next_power_of_2(num_offs)
     BLOCK_SIZE_Q = 8
-    grid = (
-        num_k_heads * batch_size,
-        triton.cdiv(total_query_len, BLOCK_SIZE_Q),
-        triton.cdiv(max_blocks, BLOCK_SIZE_K),
-    )
-    _transform_score_kernel[grid](
-        score,
-        block_score,
-        offs,
-        cu_seqlens_q,
-        num_k_heads,
-        offs.shape[0],
-        max_key_len,
-        max_blocks,
-        pad_len,
-        block_size,
-        block_size // kernel_stride,
-        init_blocks,
-        local_blocks,
-        score.stride(0),
-        score.stride(1),
-        score.stride(2),
-        block_score.stride(0),
-        block_score.stride(1),
-        block_score.stride(2),
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        BLOCK_SIZE_O=BLOCK_SIZE_O,
-        num_warps=8,
-        num_stages=3,
-    )
-    return block_score
+    # 计算总q块和k块数量
+    q_blocks = triton.cdiv(total_query_len, BLOCK_SIZE_Q)
+    k_blocks = triton.cdiv(max_blocks, BLOCK_SIZE_K)
+    # 计算总grid尺寸
+    total_grid_size = num_k_heads * batch_size * q_blocks * k_blocks
+    if total_grid_size <= utils.MAX_GRID_DIM:
+        print(
+            f"transform_score: num_k_heads {num_k_heads},batch_size {batch_size},q_blocks {q_blocks},k_blocks {k_blocks}"
+        )
+        print(
+            f"transform_score: score {score},score shape {score.shape},cu_seqlens_q {cu_seqlens_q},cu_seqlens_q shape  {cu_seqlens_q.shape},num_offs {num_offs}"
+        )
+        # 无需切割，直接运行完整grid
+        grid = (num_k_heads * batch_size, q_blocks, k_blocks)
+        _transform_score_kernel[grid](
+            score,
+            block_score,
+            offs,
+            cu_seqlens_q,
+            num_k_heads,
+            num_offs,
+            max_key_len,
+            max_blocks,
+            pad_len,
+            block_size,
+            block_size // kernel_stride,
+            init_blocks,
+            local_blocks,
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            block_score.stride(0),
+            block_score.stride(1),
+            block_score.stride(2),
+            q_block_offset=0,  # 起始q块偏移为0
+            BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            BLOCK_SIZE_O=BLOCK_SIZE_O,
+            num_warps=8,
+            num_stages=3,
+        )
+    else:
+        print(f"enter transform_score split grid")
+        print(f"BLOCK_SIZE_Q {BLOCK_SIZE_Q},BLOCK_SIZE_K {BLOCK_SIZE_K} triton.next_power_of_2(max_blocks) {triton.next_power_of_2(max_blocks)},BLOCK_SIZE_O {BLOCK_SIZE_O}")
+        print(
+            f"transform_score split grid: num_k_heads {num_k_heads},batch_size {batch_size},q_blocks {q_blocks},k_blocks {k_blocks}"
+        )
+        print(
+            f"transform_score split grid: score {score},score shape {score.shape},cu_seqlens_q {cu_seqlens_q},cu_seqlens_q shape  {cu_seqlens_q.shape},num_offs {num_offs}"
+        )
+        
+        # 计算单次最大可处理的q块数量（确保不超过grid限制）
+        # 单次grid尺寸 = num_k_heads * batch_size * curr_q_blocks * k_blocks <= 65535
+        max_curr_q_blocks = utils.MAX_GRID_DIM // (num_k_heads * batch_size * k_blocks)
+        if max_curr_q_blocks <= 0:
+            raise ValueError(
+                f"无法满足grid限制,num_k_heads={num_k_heads}, batch_size={batch_size}, k_blocks={k_blocks}"
+            )
+        # 按q块分批次处理（切割total_query_len）
+        for q_block_start in range(0, q_blocks, max_curr_q_blocks):
+            print(f"q_block_start {q_block_start}")
+            # 当前批次处理的q块数量（最后一批可能不足）
+            curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
+            # 当前批次的grid尺寸
+            grid = (num_k_heads * batch_size, curr_q_blocks, k_blocks)
+            print(
+                f"max_curr_q_blocks {max_curr_q_blocks},q_block_start {q_block_start},q_blocks {q_blocks}"
+            )
+            # 启动kernel处理当前批次
+            _transform_score_kernel[grid](
+                score,
+                block_score,
+                offs,
+                cu_seqlens_q,
+                num_k_heads,
+                num_offs,
+                max_key_len,
+                max_blocks,
+                pad_len,
+                block_size,
+                block_size // kernel_stride,
+                init_blocks,
+                local_blocks,
+                score.stride(0),
+                score.stride(1),
+                score.stride(2),
+                block_score.stride(0),
+                block_score.stride(1),
+                block_score.stride(2),
+                q_block_offset=q_block_start,  # 传递当前批次的q块起始偏移
+                BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_O=BLOCK_SIZE_O,
+                num_warps=8,
+                num_stages=3,
+            )
 
+    return block_score
 
 def compressed_attention(
     q: torch.Tensor,
@@ -1296,6 +1365,7 @@ def compressed_attention(
             topk_idx_list = []
             for h in range(num_k_heads):
                 # recompute score
+                breakpoint()
                 score = _get_attention_score(
                     q[:, h * num_shared_q_heads : (h + 1) * num_shared_q_heads],
                     k[:, h : h + 1],

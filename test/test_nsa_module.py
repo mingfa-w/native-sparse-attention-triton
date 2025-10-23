@@ -25,13 +25,13 @@ if __name__ == "__main__":
         NativeSparseAttention(
             compress_type="avgpool",
             hidden_size=8192,
-            num_q_heads=64,
-            num_kv_heads=4,
+            num_q_heads=5,
+            num_kv_heads=5,
             head_dim=128,
             kernel_size=32,
             kernel_stride=16,
             block_size=64,
-            topk=16,
+            topk=5,
             init_blocks=1,
             local_blocks=2,
             window_size=512,
@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([4000, 8192, 16384]).int().cuda()
+    seqlens = torch.LongTensor([102400]).int().cuda()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="cuda"),
@@ -64,9 +64,9 @@ if __name__ == "__main__":
         ],
         dim=0,
     ).to(torch.int32)
-    x = torch.zeros(cu_seqlens[-1], 8192, device="cuda", dtype=torch.bfloat16).uniform_(
+    x = torch.zeros(cu_seqlens[-1], 8192, device="cpu", dtype=torch.bfloat16).uniform_(
         -1, 1
-    )
+    ).cuda()
 
     # forward test
     print("======= NSA Forward & Backward Test =======\n")

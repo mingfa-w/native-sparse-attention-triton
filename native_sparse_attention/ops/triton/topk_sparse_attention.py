@@ -63,7 +63,7 @@ def forward_kernel(
     stride_lh,
     stride_ln,
     # 新增：当前批次的q块起始偏移
-    q_block_offset: tl.constexpr,
+    q_block_offset,
     # META parameters
     BLOCK_SIZE_K: tl.constexpr,  # k block size
     BLOCK_SIZE_D: tl.constexpr,
@@ -207,7 +207,7 @@ def backward_sum_o_do(
     stride_dod,
     stride_dh,
     stride_dn,
-    o_block_offset: tl.constexpr,
+    o_block_offset,
     BLOCK_SIZE_O: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
@@ -756,7 +756,7 @@ def backward_dkdv(
     stride_dvn,
     stride_dvh,
     stride_dvd,
-    k_block_offset: tl.constexpr,
+    k_block_offset,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -928,7 +928,7 @@ def backward_dq(
     stride_dqn,
     stride_dqh,
     stride_dqd,
-    q_block_offset: tl.constexpr,
+    q_block_offset,
     # META parameters
     BLOCK_SIZE_K: tl.constexpr,  # k block size
     BLOCK_SIZE_D: tl.constexpr,
@@ -1131,11 +1131,11 @@ def _topk_sparse_attention_fwd(
             raise ValueError(
                 f"无法满足grid限制,batch_size={batch_size}, num_k_heads={num_k_heads}"
             )
-        
         # 按q块分批次处理（切割max_seqlen_q）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
+            print(f"topk forward: q_block_start {q_block_start} q_blocks {q_blocks} max_curr_q_blocks {max_curr_q_blocks},curr_q_blocks {curr_q_blocks}")
             # 当前批次的grid尺寸
             grid = (batch_size, num_k_heads, curr_q_blocks)
             
@@ -1216,8 +1216,9 @@ def _topk_sparse_attention_bwd(
             num_stages=num_stages,
         )
     else:
+        print(f"enter topk backward_sum_o_do spit grid")
         max_curr_o_blocks = utils.MAX_GRID_DIM // num_o_heads
-
+ 
         # 按q块分批次处理（切割max_seqlen_q）
         for o_block_start in range(0, o_blocks, max_curr_o_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
@@ -1487,6 +1488,7 @@ def _topk_sparse_attention_bwd(
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
+            print(f"topk backward_dq q_block_start {q_block_start},q_blocks {q_blocks},max_curr_q_blocks {max_curr_q_blocks} curr_q_blocks {curr_q_blocks}")
             # 当前批次的grid尺寸
             grid = (batch_size, num_k_heads, curr_q_blocks)
             backward_dq[grid](
@@ -1533,10 +1535,9 @@ def _topk_sparse_attention_bwd(
             BLOCK_SIZE_D=BLOCK_SIZE_D,
             BLOCK_SIZE_H=BLOCK_SIZE_H,
             BLOCK_SIZE_T=BLOCK_SIZE_T,
-            #num_warps=num_warps,
-            #num_stages=num_stages, 
-            )
-
+            num_warps=num_warps,
+            num_stages=num_stages, 
+            ) 
     return dq, dk, dv
 
 

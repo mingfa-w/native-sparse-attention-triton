@@ -60,7 +60,7 @@ def forward_kernel(
     stride_lh,
     stride_ln,
     # 当前批次的起始q块偏移（核心参数）
-    q_block_start: tl.constexpr,
+    q_block_start,
     # 元参数
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -73,7 +73,7 @@ def forward_kernel(
     pid_q_local = tl.program_id(2)  # 当前批次内的局部q块ID
 
     # 计算全局q块ID（局部ID + 批次起始偏移）
-    global_pid_q = pid_q_local + q_block_start
+    pid_q = pid_q_local + q_block_start
 
     # KV头ID计算
     pid_kh = pid_h // NUM_SHARE_Q_HEADS
@@ -85,7 +85,7 @@ def forward_kernel(
     k_len = tl.load(cu_seqlens_k + pid_b + 1) - k_start
 
     # 计算当前q块在序列中的起始位置（基于全局q块ID）
-    q_start_in_seq = global_pid_q * BLOCK_SIZE_Q + kernel_size - 1
+    q_start_in_seq = pid_q * BLOCK_SIZE_Q + kernel_size - 1
 
     # 跳过超出实际序列长度的q块
     if q_start_in_seq >= q_len:
@@ -171,9 +171,8 @@ def forward_kernel(
     tl.store(ptr, acc_o.to(o_ptr.dtype.element_ty), mask=mask)
 
     # 保存lse
-    l_mask = off_q < q_len
     l_ptrs = lse_ptr + q_start * stride_ln + pid_h * stride_lh + off_q * stride_ln
-    tl.store(l_ptrs, lse_i, mask=l_mask)
+    tl.store(l_ptrs, lse_i, mask=off_q < q_len)
 
 
 @triton.jit
@@ -191,7 +190,7 @@ def backward_sum_o_do(
     stride_dod,
     stride_dh,
     stride_dn,
-    o_block_offset: tl.constexpr,
+    o_block_offset,
     BLOCK_SIZE_O: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
@@ -480,7 +479,7 @@ def backward_dq(
     stride_dqn,
     stride_dqh,
     stride_dqd,
-    q_block_offset: tl.constexpr,
+    q_block_offset,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -618,6 +617,7 @@ def _compressed_attention_fwd(
     max_seqlen_k: int,
     sm_scale: float,
 ):
+    print("Enter compressed attention fwd")
     # 原有检查和初始化逻辑
     assert k.dtype == q.dtype and v.dtype == q.dtype
     assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
@@ -647,7 +647,6 @@ def _compressed_attention_fwd(
     # 计算总q块数量和单次最大允许的q块数量
     num_q_blocks = triton.cdiv(max_seqlen_q, BLOCK_SIZE_Q)  # 总q块数
     total_grid_size = batch_size * num_q_heads * num_q_blocks  # 总grid尺寸
-
     if total_grid_size <= utils.MAX_GRID_DIM:
         # 无需切割，单次启动kernel
         grid = (batch_size, num_q_heads, num_q_blocks)
@@ -687,6 +686,7 @@ def _compressed_attention_fwd(
             num_stages=num_stages,
         )
     else:
+        print("compressed forward enter grid split")
         # 计算单次最大可处理的q块数量（确保batch_size * num_q_heads * curr_blocks <= 65536）
         MAX_GRID_Q_BLOCKS_PER_LAUNCH = utils.MAX_GRID_DIM // (batch_size * num_q_heads)
         if MAX_GRID_Q_BLOCKS_PER_LAUNCH <= 0:
@@ -698,8 +698,7 @@ def _compressed_attention_fwd(
         for start_block in range(0, num_q_blocks, MAX_GRID_Q_BLOCKS_PER_LAUNCH):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_blocks = min(MAX_GRID_Q_BLOCKS_PER_LAUNCH, num_q_blocks - start_block)
-            grid = (batch_size, num_q_heads, curr_blocks)  # 本次grid尺寸
-
+            grid =  (batch_size,num_q_heads, curr_blocks)
             # 启动kernel处理当前批次的q块
             forward_kernel[grid](
                 q,
@@ -755,6 +754,7 @@ def _compressed_attention_bwd(
     max_seqlen_k: int,
     sm_scale: float,
 ):
+    print("Enter compressed attention bwd")
     q_len, num_q_heads, head_dim = q.shape
     k_len, num_k_heads, head_dim = k.shape
     v_len, num_v_heads, head_dim = v.shape
@@ -793,6 +793,7 @@ def _compressed_attention_bwd(
     else:
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = batch_size * num_k_heads * curr_q_blocks <= 65535
+        print("compressed backward backward_sum_o_do enter grid split")
         max_curr_o_blocks = utils.MAX_GRID_DIM // num_o_heads
 
         # 按q块分批次处理（切割max_seqlen_q）
@@ -942,6 +943,7 @@ def _compressed_attention_bwd(
             num_stages=num_stages,
         )
     else:
+        print("enter compressed backward_dq split grid")
         max_curr_q_blocks = utils.MAX_GRID_DIM // (batch_size * num_q_heads)
         # 按q块分批次处理（切割max_seqlen_q）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
@@ -1093,7 +1095,7 @@ def score_kernel(
     stride_sq,
     stride_sk,
     # 新增：当前批次的q块起始偏移
-    q_block_offset: tl.constexpr,
+    q_block_offset,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -1174,6 +1176,7 @@ def score_kernel(
         s_ptr + pid_kh * stride_sh + q_start * stride_sq + Q * stride_sq + D * stride_sk
     )
     tl.store(ptr, s.to(s_ptr.dtype.element_ty), mask=mask)
+    
 
 
 def _get_attention_score(
@@ -1187,6 +1190,7 @@ def _get_attention_score(
     max_seqlen_q: int,
     max_seqlen_k: int,
     sm_scale: float,
+    score: torch.Tensor,
 ) -> torch.Tensor:
     # dtype check
     assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
@@ -1203,10 +1207,11 @@ def _get_attention_score(
     # gqa
     assert num_q_heads % num_k_heads == 0
     num_share_q_heads = num_q_heads // num_k_heads
+    print(f"_get_attention_score num_k_heads {num_k_heads},q_len {q_len},max_seqlen_k {max_seqlen_k},num_share_q_heads {num_share_q_heads}")
     # init score
-    score = torch.zeros(
-        num_k_heads, q_len, max_seqlen_k, dtype=torch.float32, device=q.device
-    )
+    #score = torch.zeros(
+    #    num_k_heads, q_len, max_seqlen_k, dtype=torch.float32, device=q.device
+    #)
 
     # 配置参数
     BLOCK_SIZE_Q = 64
@@ -1254,19 +1259,19 @@ def _get_attention_score(
     else:
         # 计算单次最大可处理的q块数量（确保不超过grid限制）
         # 单次grid尺寸 = batch_size * num_k_heads * curr_q_blocks * k_blocks <= 65535
+        print(f"enter score_kernel grid split")
         max_curr_q_blocks = utils.MAX_GRID_DIM // (batch_size * num_k_heads * k_blocks)
         if max_curr_q_blocks <= 0:
             raise ValueError(
                 f"无法满足grid限制,batch_size={batch_size}, num_k_heads={num_k_heads}, k_blocks={k_blocks}"
             )
-
         # 按q块分批次处理（切割max_seqlen_q）
         for q_block_start in range(0, q_blocks, max_curr_q_blocks):
             # 当前批次处理的q块数量（最后一批可能不足）
             curr_q_blocks = min(max_curr_q_blocks, q_blocks - q_block_start)
             # 当前批次的grid尺寸
             grid = (batch_size * num_k_heads, curr_q_blocks, k_blocks)
-
+            print(f"score_kernel:q_block_start {q_block_start},curr_q_blocks {curr_q_blocks} k_blocks {k_blocks},max_curr_q_blocks {max_curr_q_blocks}")
             # 启动kernel处理当前批次
             score_kernel[grid](
                 q,
@@ -1299,7 +1304,16 @@ def _get_attention_score(
                 num_warps=8,
                 num_stages=3,
             )
-
+        #torch.npu.synchronize()
+        #print(f"score is {score}")
+        """  
+        import torch_npu
+        # 执行所有批次后，打印内存统计信息
+        stats = torch.npu.memory_stats()
+        print(f"stats {stats}")
+        print(f"torch_npu.npu.memory_allocated {torch_npu.npu.memory_allocated()}")
+        print(f"torch_npu.npu.memory_reserved {torch_npu.npu.memory_reserved()}") """
+    
     return score
 
 
@@ -1328,7 +1342,7 @@ def _transform_score_kernel(
     stride_bsq,
     stride_bsk,
     # 新增：当前批次的q块起始偏移
-    q_block_offset: tl.constexpr,
+    q_block_offset,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -1355,7 +1369,7 @@ def _transform_score_kernel(
     w = tl.load(offs + off_o, mask=off_o < num_offs, other=0)
 
     # load score：基于全局q块ID计算实际序列索引
-    off_q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)  # 全局q索引
+    off_q = pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q).to(tl.int64)  # 全局q索引
     off_k = (k_start + tl.arange(0, BLOCK_SIZE_K)) * block_stride - pad_len
     off_k= tl.maximum(0, off_k)
     off_k = off_k[None, :] + off_o[:, None]
@@ -1425,7 +1439,7 @@ def transform_score(
         num_k_heads,
         total_query_len,
         max_blocks,
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
         device=score.device,
     )
     offs = (
@@ -1458,7 +1472,7 @@ def transform_score(
             offs,
             cu_seqlens_q,
             num_k_heads,
-            num_offs,
+            offs.shape[0],
             max_key_len,
             max_blocks,
             pad_len,
@@ -1513,7 +1527,7 @@ def transform_score(
                 offs,
                 cu_seqlens_q,
                 num_k_heads,
-                num_offs,
+                offs.shape[0],
                 max_key_len,
                 max_blocks,
                 pad_len,
@@ -1594,7 +1608,6 @@ def compressed_attention(
         max_seqlen_k,
         sm_scale,
     )
-
     # do not select topk index
     if topk <= 0:
         warnings.warn("topk <= 0, returned topk_idx will be None")
@@ -1653,9 +1666,16 @@ def compressed_attention(
         # FIXME: need to fix later
         else:
             topk_idx_list = []
+            q_len, _, _ = q.shape
+            print(f"before _get_attention_score q_len{q_len},num_k_heads {num_k_heads}")
+            # only keep one score tensor, to avoid out of memory
+            score = torch.zeros(
+                1, q_len, max_seqlen_k, dtype=torch.bfloat16, device=q.device
+            )
             for h in range(num_k_heads):
                 # recompute score
-                score = _get_attention_score(
+                score.zero_()
+                score=_get_attention_score(
                     q[:, h * num_shared_q_heads : (h + 1) * num_shared_q_heads],
                     k[:, h : h + 1],
                     lse[h * num_shared_q_heads : (h + 1) * num_shared_q_heads],
@@ -1666,6 +1686,7 @@ def compressed_attention(
                     max_seqlen_q,
                     max_seqlen_k,
                     sm_scale,
+                    score,
                 )
                 # transform score to block-wise score
                 score = transform_score(
@@ -1679,7 +1700,7 @@ def compressed_attention(
                     max_seqlen_k,
                     init_blocks,
                     local_blocks,
-                )
+                ) 
                 # get topk
                 topk = min(topk, score.shape[-1])
                 topk_idx = score.topk(topk, dim=-1).indices.sort(-1).values

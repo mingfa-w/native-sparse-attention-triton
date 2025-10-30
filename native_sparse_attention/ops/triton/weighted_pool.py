@@ -113,12 +113,13 @@ def sliding_pool_dxdw_kernel(
     stride_dwh,
     stride_dwn,
     stride_dwk,
+    k_block_start,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
 ):
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
-    pid_k = tl.program_id(2)
+    pid_k = tl.program_id(2) + k_block_start
     # get start and len after rmpad
     x_start = tl.load(cu_seqlens + pid_b)
     x_len = tl.load(cu_seqlens + pid_b + 1) - x_start
@@ -296,8 +297,11 @@ class SlidingWindowWeightedPool(torch.autograd.Function):
             )
         BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
         BLOCK_SIZE_K = triton.next_power_of_2(kernel_size)
-        grid = (batch_size, num_heads, y_seqlens.max().item())
-        sliding_pool_dxdw_kernel[grid](
+        y_seqlens_max = y_seqlens.max().item()
+        total_grid_elems = batch_size * num_heads * y_seqlens_max
+        if total_grid_elems <= utils.MAX_GRID_DIM:
+            grid = (batch_size, num_heads, y_seqlens_max)
+            sliding_pool_dxdw_kernel[grid](
             x,
             dx,
             dy,
@@ -322,9 +326,46 @@ class SlidingWindowWeightedPool(torch.autograd.Function):
             dw.stride(0) if w is not None else None,
             dw.stride(1) if w is not None else None,
             dw.stride(2) if w is not None else None,
+            k_block_start=0,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
-        )
+        )         
+        else:
+            print(f"weighted_pool backward dxdw enter split grid")
+            max_curr_k_blocks = utils.MAX_GRID_DIM // (batch_size * num_heads)
+            for start_block in range(0, y_seqlens_max, max_curr_k_blocks):
+            # 当前批次处理的q块数量（最后一批可能不足）
+                curr_blocks = min(max_curr_k_blocks, y_seqlens_max - start_block)
+                grid = (batch_size, num_heads, curr_blocks)
+                sliding_pool_dxdw_kernel[grid](
+                x,
+                dx,
+                dy,
+                w,
+                dw if w is not None else None,
+                cu_seqlens,
+                y_cu_seqlens,
+                head_dim,
+                kernel_size,
+                kernel_stride,
+                x.stride(0),
+                x.stride(1),
+                x.stride(2),
+                dx.stride(0),
+                dx.stride(1),
+                dx.stride(2),
+                dy.stride(0),
+                dy.stride(1),
+                dy.stride(2),
+                w.stride(0) if w is not None else None,
+                w.stride(1) if w is not None else None,
+                dw.stride(0) if w is not None else None,
+                dw.stride(1) if w is not None else None,
+                dw.stride(2) if w is not None else None,
+                k_block_start=start_block,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                BLOCK_SIZE_D=BLOCK_SIZE_D,
+            ) 
         dx = dx.to(x.dtype)
         if w is None:
             dw = None

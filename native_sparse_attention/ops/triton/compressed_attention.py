@@ -1190,7 +1190,6 @@ def _get_attention_score(
     max_seqlen_q: int,
     max_seqlen_k: int,
     sm_scale: float,
-    score: torch.Tensor,
 ) -> torch.Tensor:
     # dtype check
     assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
@@ -1209,9 +1208,9 @@ def _get_attention_score(
     num_share_q_heads = num_q_heads // num_k_heads
     print(f"_get_attention_score num_k_heads {num_k_heads},q_len {q_len},max_seqlen_k {max_seqlen_k},num_share_q_heads {num_share_q_heads}")
     # init score
-    #score = torch.zeros(
-    #    num_k_heads, q_len, max_seqlen_k, dtype=torch.float32, device=q.device
-    #)
+    score = torch.zeros(
+        num_k_heads, q_len, max_seqlen_k, dtype=torch.float32, device=q.device
+    )
 
     # 配置参数
     BLOCK_SIZE_Q = 64
@@ -1304,16 +1303,6 @@ def _get_attention_score(
                 num_warps=8,
                 num_stages=3,
             )
-        #torch.npu.synchronize()
-        #print(f"score is {score}")
-        """  
-        import torch_npu
-        # 执行所有批次后，打印内存统计信息
-        stats = torch.npu.memory_stats()
-        print(f"stats {stats}")
-        print(f"torch_npu.npu.memory_allocated {torch_npu.npu.memory_allocated()}")
-        print(f"torch_npu.npu.memory_reserved {torch_npu.npu.memory_reserved()}") """
-    
     return score
 
 
@@ -1439,7 +1428,7 @@ def transform_score(
         num_k_heads,
         total_query_len,
         max_blocks,
-        dtype=torch.bfloat16,
+        dtype=torch.float32,
         device=score.device,
     )
     offs = (
@@ -1666,15 +1655,9 @@ def compressed_attention(
         # FIXME: need to fix later
         else:
             topk_idx_list = []
-            q_len, _, _ = q.shape
-            print(f"before _get_attention_score q_len{q_len},num_k_heads {num_k_heads}")
-            # only keep one score tensor, to avoid out of memory
-            score = torch.zeros(
-                1, q_len, max_seqlen_k, dtype=torch.bfloat16, device=q.device
-            )
+            breakpoint()
             for h in range(num_k_heads):
                 # recompute score
-                score.zero_()
                 score=_get_attention_score(
                     q[:, h * num_shared_q_heads : (h + 1) * num_shared_q_heads],
                     k[:, h : h + 1],
@@ -1686,7 +1669,6 @@ def compressed_attention(
                     max_seqlen_q,
                     max_seqlen_k,
                     sm_scale,
-                    score,
                 )
                 # transform score to block-wise score
                 score = transform_score(

@@ -56,7 +56,7 @@ if __name__ == "__main__":
         print(f"NSA Parameters, {name}, shape: {param.shape}\n")
 
     # random input
-    seqlens = torch.LongTensor([102400]).int().npu()
+    seqlens = torch.LongTensor([300000]).int().npu()
     cu_seqlens = torch.cat(
         [
             torch.zeros(1, dtype=torch.int32, device="npu"),
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     print(f"Forward, output shape: {y.shape}, output norm: {y.norm()}\n")
 
     # backward test
-    loss = (y * torch.randn_like(y)).sum(-1).mean()
+    loss = (y * torch.randn_like(y.cpu()).npu()).sum(-1).mean()
     loss.backward()
     for name, param in NSA.named_parameters():
         print(

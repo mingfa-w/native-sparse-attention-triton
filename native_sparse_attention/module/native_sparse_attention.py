@@ -216,12 +216,14 @@ class NativeSparseAttention(torch.nn.Module):
             pse=None,
             padding_mask=None,
             atten_mask=atten_mask_npu,
+            pre_tocken=self.window_size,
+            next_tocken=0,
             scale=1.0 / math.sqrt(q.shape[-1]),
             keep_prob=1,
             input_layout="TND",
             actual_seq_qlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
             actual_seq_kvlen=tuple(cu_seqlens[1:].cpu().numpy().tolist()),
-            sparse_mode=3)[0]
+            sparse_mode=4)[0]
 
         """    
         # sliding window attention

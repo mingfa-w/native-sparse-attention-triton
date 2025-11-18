@@ -831,7 +831,7 @@ def _compressed_attention_bwd(
         num_share_q_heads, k_len, num_k_heads, head_dim, device=k.device, dtype=k.dtype
     )
     batch_size = cu_seqlens_q.shape[0] - 1
-    print(f"compressed max_seqlen_k {max_seqlen_k},max_seqlen_q {max_seqlen_q}")
+    print(f"compressed backward_dkdv max_seqlen_k {max_seqlen_k},max_seqlen_q {max_seqlen_q}")
     grid = lambda META: (
         batch_size,
         num_q_heads,
@@ -1507,7 +1507,7 @@ def transform_score(
             # 当前批次的grid尺寸
             grid = (num_k_heads * batch_size, curr_q_blocks, k_blocks)
             print(
-                f"max_curr_q_blocks {max_curr_q_blocks},q_block_start {q_block_start},q_blocks {q_blocks}"
+                f"transform_score: max_curr_q_blocks {max_curr_q_blocks},q_block_start {q_block_start},q_blocks {q_blocks}"
             )
             # 启动kernel处理当前批次
             _transform_score_kernel[grid](
@@ -1655,7 +1655,6 @@ def compressed_attention(
         # FIXME: need to fix later
         else:
             topk_idx_list = []
-            breakpoint()
             for h in range(num_k_heads):
                 # recompute score
                 score=_get_attention_score(

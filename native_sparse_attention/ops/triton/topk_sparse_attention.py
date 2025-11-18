@@ -39,7 +39,7 @@ def forward_kernel(
     NUM_KV_HEADS,
     NUM_SHARE_Q_HEADS,
     HEAD_DIM,
-    TOPK,
+    TOPK: tl.constexpr,
     # q loop num
     num_q_loop,
     # sm_scale
@@ -348,11 +348,13 @@ def count_kernel(
     y = tl.zeros((BLOCK_SIZE_R,), dtype=tl.int32)
     # loop
     for i in range(0, seq_len, BLOCK_SIZE_N):
+        mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :]
         x = tl.load(
             x_ptr + off_n[:, None] * stride_xn + off_k[None, :] * stride_xk + i * stride_xn,
-            mask=(off_n < seq_len - i)[:, None] & (off_k < topk)[None, :],
+            mask=mask,
             other=-1,
         )
+        x = tl.where(mask, x, -1)
         x = tl.ravel(x)
         # y += tl.histogram(x, BLOCK_SIZE_R)
         bins = tl.arange(0, BLOCK_SIZE_R)
@@ -1099,7 +1101,11 @@ def _topk_sparse_attention_fwd(
     # 计算总q块数量和总grid尺寸
     q_blocks = triton.cdiv(max_seqlen_q, num_q_loop)
     total_grid_size = batch_size * num_k_heads * q_blocks
-
+    print(f"topk forward: max_seqlen_q {max_seqlen_q} num_q_loop {num_q_loop} block_size {block_size},cu_seqlens_q {cu_seqlens_q} cu_seqlens_k {cu_seqlens_k}")
+    print(f"topk forward: q.shape {q.shape} k.shape {k.shape} q.shape {v.shape} topk_idx {topk_idx}")
+    print(f"q.stride(0) {q.stride(0)}, q.stride(1) {q.stride(1)}, q.stride(2) {q.stride(2)}")
+    print(f"v.stride(0) {v.stride(0)}, v.stride(1) {v.stride(1)}, v.stride(2) {v.stride(2)}")
+    print(f"k.stride(0) {k.stride(0)}, k.stride(1) {k.stride(1)}, k.stride(2) {k.stride(2)}")
     if total_grid_size <= utils.MAX_GRID_DIM:
         # 无需切割，直接运行完整grid
         grid = (batch_size, num_k_heads, q_blocks)
